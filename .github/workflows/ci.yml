@@ -55,6 +55,10 @@ on:
         description: "Run lint/typecheck/build/test as separate matrix jobs"
         type: boolean
         default: false
+      skip-on-docs-only:
+        description: "Skip CI when PR only touches docs/non-code files"
+        type: boolean
+        default: true
     secrets:
       DOPPLER_TOKEN:
         required: false
@@ -64,8 +68,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!**/docs/**'
+              - '!**/LICENSE*'
+              - '!**/.editorconfig'
+              - '!**/.vscode/**'
+              - '!**/CLAUDE.md'
+              - '!**/.specifyignore'
+              - '!**/.prettierignore'
+              - '!**/.gitignore'
+
   ci:
-    if: ${{ !inputs.enable-matrix }}
+    needs: changes
+    if: >-
+      !inputs.enable-matrix
+      && (needs.changes.outputs.code == 'true' || !inputs.skip-on-docs-only)
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
     defaults:
       run:
@@ -130,7 +160,10 @@ jobs:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
 
   ci-matrix:
-    if: ${{ inputs.enable-matrix }}
+    needs: changes
+    if: >-
+      inputs.enable-matrix
+      && (needs.changes.outputs.code == 'true' || !inputs.skip-on-docs-only)
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
     strategy:
       fail-fast: false
@@ -174,3 +207,28 @@ jobs:
         run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs[matrix.script] }}
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+  # Stable check for branch protection. Succeeds when CI passes or
+  # when CI is skipped because only non-code files changed.
+  ci-ok:
+    if: always()
+    needs: [changes, ci, ci-matrix]
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - run: |
+          if [ "$CODE_CHANGED" != "true" ]; then
+            echo "CI skipped — only non-code files changed"
+            exit 0
+          fi
+          if [ "$CI_RESULT" = "success" ] || [ "$CI_RESULT" = "skipped" ]; then
+            if [ "$MATRIX_RESULT" = "success" ] || [ "$MATRIX_RESULT" = "skipped" ]; then
+              echo "CI passed"
+              exit 0
+            fi
+          fi
+          echo "CI failed"
+          exit 1
+        env:
+          CODE_CHANGED: ${{ needs.changes.outputs.code }}
+          CI_RESULT: ${{ needs.ci.result }}
+          MATRIX_RESULT: ${{ needs.ci-matrix.result }}
