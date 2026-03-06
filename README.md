@@ -13,7 +13,6 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
 | [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + migrations | `migration-command`, `doppler-project`, scripts |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
-| [`dependency-review.yml`](.github/workflows/dependency-review.yml) | Vulnerability and license scanning on PRs | `fail-on-severity`, `deny-licenses` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
 
 ## Usage
@@ -38,9 +37,6 @@ jobs:
     if: "!startsWith(github.head_ref, 'release-please') && github.actor != 'release-please[bot]'"
     uses: unstable-studios/.github/.github/workflows/ci.yml@main
     secrets: inherit
-
-  deps:
-    uses: unstable-studios/.github/.github/workflows/dependency-review.yml@main
 ```
 
 ### With Doppler + Matrix
