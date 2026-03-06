@@ -52,11 +52,13 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Release PR Validation" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Manifest: $MANIFEST_FILE" >> "$GITHUB_STEP_SUMMARY"
-          echo "- PR title: $PR_TITLE" >> "$GITHUB_STEP_SUMMARY"
-          echo "- CHANGELOG updated" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Release PR Validation"
+            echo ""
+            echo "- Manifest: $MANIFEST_FILE"
+            echo "- PR title: $PR_TITLE"
+            echo "- CHANGELOG updated"
+          } >> "$GITHUB_STEP_SUMMARY"
         env:
           MANIFEST_FILE: ${{ inputs.manifest-file }}
           PR_TITLE: ${{ github.event.pull_request.title }}

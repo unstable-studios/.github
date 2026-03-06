@@ -87,8 +87,10 @@ jobs:
 
       - name: Summary
         run: |
-          echo "## Package Published" >> "$GITHUB_STEP_SUMMARY"
-          echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Registry: ${{ inputs.registry-url }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Filter: ${{ inputs.package-filter || '(root)' }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- Dry run: ${{ inputs.dry-run }}" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## Package Published"
+            echo ""
+            echo "- Registry: ${{ inputs.registry-url }}"
+            echo "- Filter: ${{ inputs.package-filter || '(root)' }}"
+            echo "- Dry run: ${{ inputs.dry-run }}"
+          } >> "$GITHUB_STEP_SUMMARY"
