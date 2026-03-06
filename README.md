@@ -11,7 +11,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`release-pr-check.yml`](.github/workflows/release-pr-check.yml) | Lightweight gate for release PRs (skip full CI) | `manifest-file` |
 | [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file` |
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
-| [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + D1 migrations | `d1-database`, `doppler-project`, scripts |
+| [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + migrations | `migration-command`, `doppler-project`, scripts |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
 | [`dependency-review.yml`](.github/workflows/dependency-review.yml) | Vulnerability and license scanning on PRs | `fail-on-severity`, `deny-licenses` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
@@ -95,7 +95,7 @@ jobs:
   cloudflare:
     uses: unstable-studios/.github/.github/workflows/deploy-cloudflare.yml@main
     with:
-      d1-database: my-db
+      migration-command: "pnpm drizzle-kit migrate"
       doppler-project: my-app
     secrets: inherit
 
@@ -152,3 +152,4 @@ jobs:
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.
 - **Secrets**: Use `secrets: inherit` to pass all secrets from the caller. Doppler integration is opt-in via `doppler-project` input.
 - **Conventional commits**: Enforced via `commitlint.yml`. Repos should have `@commitlint/config-conventional` as a dev dependency.
+- **Database migrations**: Use [Drizzle ORM](https://orm.drizzle.team/) with `drizzle-kit` for D1 schema management. Define schema in TypeScript, generate migrations with `drizzle-kit generate`, and run them in CI via the `migration-command` input on `deploy-cloudflare.yml`. This replaces hand-written SQL migrations and `wrangler d1 migrations apply`.
