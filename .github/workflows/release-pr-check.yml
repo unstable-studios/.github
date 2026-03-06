@@ -1,0 +1,62 @@
+name: Release PR Check
+
+on:
+  workflow_call:
+    inputs:
+      manifest-file:
+        description: "Path to .release-please-manifest.json"
+        type: string
+        default: ".release-please-manifest.json"
+
+jobs:
+  validate:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    if: >-
+      startsWith(github.head_ref, 'release-please')
+      || github.actor == 'release-please[bot]'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate manifest exists
+        run: |
+          if [ ! -f "$MANIFEST_FILE" ]; then
+            echo "::error::Release manifest not found at $MANIFEST_FILE"
+            exit 1
+          fi
+          echo "Manifest found:"
+          cat "$MANIFEST_FILE"
+        env:
+          MANIFEST_FILE: ${{ inputs.manifest-file }}
+
+      - name: Validate PR title
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          if ! echo "$PR_TITLE" | grep -qE '^chore(\(.+\))?: release'; then
+            echo "::error::Release PR title doesn't match expected pattern: $PR_TITLE"
+            exit 1
+          fi
+          echo "PR title valid: $PR_TITLE"
+
+      - name: Validate CHANGELOG updated
+        run: |
+          CHANGED_FILES=$(gh pr diff "$PR_NUMBER" --name-only)
+          if ! echo "$CHANGED_FILES" | grep -q 'CHANGELOG.md'; then
+            echo "::error::No CHANGELOG.md changes found in this release PR"
+            exit 1
+          fi
+          echo "CHANGELOG.md updated"
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+      - name: Summary
+        run: |
+          echo "## Release PR Validation" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Manifest: $MANIFEST_FILE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- PR title: $PR_TITLE" >> "$GITHUB_STEP_SUMMARY"
+          echo "- CHANGELOG updated" >> "$GITHUB_STEP_SUMMARY"
+        env:
+          MANIFEST_FILE: ${{ inputs.manifest-file }}
+          PR_TITLE: ${{ github.event.pull_request.title }}

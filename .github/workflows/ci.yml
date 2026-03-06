@@ -1,0 +1,176 @@
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      pnpm-version:
+        description: "pnpm version"
+        type: string
+        default: "10"
+      working-directory:
+        description: "Working directory for all steps"
+        type: string
+        default: "."
+      lint-script:
+        description: "Lint command to run"
+        type: string
+        default: "pnpm lint"
+      typecheck-script:
+        description: "Typecheck command to run"
+        type: string
+        default: "pnpm typecheck"
+      build-script:
+        description: "Build command to run"
+        type: string
+        default: "pnpm build"
+      test-script:
+        description: "Test command to run (empty to skip)"
+        type: string
+        default: "pnpm test"
+      post-build-script:
+        description: "Additional script to run after build (empty to skip)"
+        type: string
+        default: ""
+      install-playwright:
+        description: "Install Playwright browsers for E2E tests"
+        type: boolean
+        default: false
+      playwright-script:
+        description: "Playwright E2E test command (empty to skip)"
+        type: string
+        default: ""
+      doppler-project:
+        description: "Doppler project name for env injection (empty to skip)"
+        type: string
+        default: ""
+      doppler-config:
+        description: "Doppler config environment (e.g. ci, staging)"
+        type: string
+        default: "ci"
+      enable-matrix:
+        description: "Run lint/typecheck/build/test as separate matrix jobs"
+        type: boolean
+        default: false
+    secrets:
+      DOPPLER_TOKEN:
+        required: false
+
+concurrency:
+  group: ci-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ci:
+    if: ${{ !inputs.enable-matrix }}
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Doppler
+        if: inputs.doppler-project != ''
+        uses: dopplerhq/cli-action@v3
+        with:
+          version: latest
+
+      - name: Lint
+        if: inputs.lint-script != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs.lint-script }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Typecheck
+        if: inputs.typecheck-script != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs.typecheck-script }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Build
+        if: inputs.build-script != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs.build-script }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Post-build
+        if: inputs.post-build-script != ''
+        run: ${{ inputs.post-build-script }}
+
+      - name: Test
+        if: inputs.test-script != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs.test-script }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Install Playwright browsers
+        if: inputs.install-playwright
+        run: pnpm exec playwright install --with-deps
+
+      - name: E2E tests
+        if: inputs.playwright-script != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs.playwright-script }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+  ci-matrix:
+    if: ${{ inputs.enable-matrix }}
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Lint
+            script: lint-script
+          - name: Typecheck
+            script: typecheck-script
+          - name: Build
+            script: build-script
+          - name: Test
+            script: test-script
+    name: ${{ matrix.name }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Doppler
+        if: inputs.doppler-project != '' && inputs[matrix.script] != ''
+        uses: dopplerhq/cli-action@v3
+        with:
+          version: latest
+
+      - name: ${{ matrix.name }}
+        if: inputs[matrix.script] != ''
+        run: ${{ inputs.doppler-project != '' && format('doppler run -p {0} -c {1} -- ', inputs.doppler-project, inputs.doppler-config) || '' }}${{ inputs[matrix.script] }}
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}

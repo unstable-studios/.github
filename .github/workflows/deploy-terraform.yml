@@ -1,0 +1,162 @@
+name: Deploy Terraform
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: "Terraform working directory"
+        type: string
+        default: "infra"
+      terraform-version:
+        description: "Terraform version (empty for latest)"
+        type: string
+        default: ""
+      doppler-project:
+        description: "Doppler project for variable injection"
+        type: string
+        default: ""
+      doppler-config:
+        description: "Doppler config environment"
+        type: string
+        default: "ci"
+      plan-only:
+        description: "Only run plan (for PR checks)"
+        type: boolean
+        default: false
+      post-plan-comment:
+        description: "Post plan output as PR comment"
+        type: boolean
+        default: true
+      sparse-checkout:
+        description: "Only checkout the infra directory"
+        type: boolean
+        default: true
+    secrets:
+      DOPPLER_TOKEN:
+        required: true
+
+concurrency:
+  group: terraform-${{ inputs.working-directory }}
+  cancel-in-progress: false
+
+jobs:
+  terraform:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: ${{ inputs.sparse-checkout && inputs.working-directory || '' }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform-version }}
+
+      - name: Setup Doppler
+        if: inputs.doppler-project != ''
+        uses: dopplerhq/cli-action@v3
+        with:
+          version: latest
+
+      - name: Cache Terraform plugins
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ inputs.working-directory }}/.terraform
+            ~/.terraform.d/plugin-cache
+          key: terraform-${{ runner.os }}-${{ hashFiles(format('{0}/.terraform.lock.hcl', inputs.working-directory)) }}
+
+      - name: Terraform init
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform init
+          else
+            terraform init
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Terraform plan
+        id: plan
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform plan -no-color -out=tfplan 2>&1 | tee plan.txt
+          else
+            terraform plan -no-color -out=tfplan 2>&1 | tee plan.txt
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Post plan comment
+        if: inputs.post-plan-comment && inputs.plan-only && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        env:
+          PLAN_FILE: ${{ inputs.working-directory }}/plan.txt
+          TF_DIR: ${{ inputs.working-directory }}
+        with:
+          script: |
+            const fs = require('fs');
+            let plan = fs.readFileSync(process.env.PLAN_FILE, 'utf8');
+            const dir = process.env.TF_DIR;
+
+            const MAX_LEN = 60000;
+            if (plan.length > MAX_LEN) {
+              plan = plan.substring(0, MAX_LEN) + '\n\n... (truncated)';
+            }
+
+            const marker = `### Terraform Plan — \`${dir}\``;
+            const body = `${marker}
+
+            <details>
+            <summary>Show plan output</summary>
+
+            \`\`\`
+            ${plan}
+            \`\`\`
+
+            </details>`;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body.startsWith(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Terraform apply
+        if: ${{ !inputs.plan-only }}
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform apply -auto-approve tfplan
+          else
+            terraform apply -auto-approve tfplan
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}

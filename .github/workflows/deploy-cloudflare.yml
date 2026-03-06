@@ -1,0 +1,136 @@
+name: Deploy Cloudflare
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      pnpm-version:
+        description: "pnpm version"
+        type: string
+        default: "10"
+      environment:
+        description: "GitHub environment for deployment protection"
+        type: string
+        default: "production"
+      working-directory:
+        description: "Working directory for wrangler"
+        type: string
+        default: "."
+      build-script:
+        description: "Build command before deploy"
+        type: string
+        default: "pnpm build"
+      wrangler-command:
+        description: "Wrangler deploy command"
+        type: string
+        default: "pnpm exec wrangler deploy"
+      d1-database:
+        description: "D1 database name for migrations (empty to skip)"
+        type: string
+        default: ""
+      pre-deploy-script:
+        description: "Script to run before deploy (e.g. secret pushing)"
+        type: string
+        default: ""
+      post-deploy-script:
+        description: "Script to run after deploy (empty to skip)"
+        type: string
+        default: ""
+      doppler-project:
+        description: "Doppler project name (empty to skip Doppler)"
+        type: string
+        default: ""
+      doppler-config:
+        description: "Doppler config environment"
+        type: string
+        default: "production"
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+      DOPPLER_TOKEN:
+        required: false
+
+concurrency:
+  group: deploy-cloudflare-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup Doppler
+        if: inputs.doppler-project != ''
+        uses: dopplerhq/cli-action@v3
+        with:
+          version: latest
+
+      - name: Run D1 migrations
+        if: inputs.d1-database != ''
+        run: pnpm exec wrangler d1 migrations apply "$D1_DATABASE" --remote
+        env:
+          D1_DATABASE: ${{ inputs.d1-database }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Build
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.build-script }}
+          else
+            ${{ inputs.build-script }}
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Pre-deploy
+        if: inputs.pre-deploy-script != ''
+        run: ${{ inputs.pre-deploy-script }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.wrangler-command }}
+          else
+            ${{ inputs.wrangler-command }}
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      - name: Post-deploy
+        if: inputs.post-deploy-script != ''
+        run: ${{ inputs.post-deploy-script }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

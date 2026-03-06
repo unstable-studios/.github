@@ -1,0 +1,55 @@
+name: Commitlint
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      pnpm-version:
+        description: "pnpm version"
+        type: string
+        default: "10"
+      config-file:
+        description: "Commitlint config file path (empty uses default)"
+        type: string
+        default: ""
+
+jobs:
+  commitlint:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate commits (PR)
+        if: github.event_name == 'pull_request'
+        run: >-
+          pnpm exec commitlint
+          ${{ inputs.config-file != '' && format('--config {0}', inputs.config-file) || '' }}
+          --from ${{ github.event.pull_request.base.sha }}
+          --to ${{ github.event.pull_request.head.sha }}
+          --verbose
+
+      - name: Validate commits (push)
+        if: github.event_name == 'push'
+        run: >-
+          pnpm exec commitlint
+          ${{ inputs.config-file != '' && format('--config {0}', inputs.config-file) || '' }}
+          --from ${{ github.event.before }}
+          --to ${{ github.event.after }}
+          --verbose

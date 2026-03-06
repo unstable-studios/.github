@@ -1,0 +1,33 @@
+name: Dependency Review
+
+on:
+  workflow_call:
+    inputs:
+      fail-on-severity:
+        description: "Minimum vulnerability severity to fail on"
+        type: string
+        default: "high"
+      deny-licenses:
+        description: "Comma-separated list of denied licenses"
+        type: string
+        default: ""
+      allow-ghsas:
+        description: "Comma-separated list of allowed GitHub Security Advisory IDs"
+        type: string
+        default: ""
+
+jobs:
+  review:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: ${{ inputs.fail-on-severity }}
+          deny-licenses: ${{ inputs.deny-licenses }}
+          allow-ghsas: ${{ inputs.allow-ghsas }}
+          comment-summary-in-pr: always

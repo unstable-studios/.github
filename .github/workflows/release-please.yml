@@ -1,0 +1,61 @@
+name: Release Please
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        description: "Path to release-please-config.json"
+        type: string
+        default: "release-please-config.json"
+      manifest-file:
+        description: "Path to .release-please-manifest.json"
+        type: string
+        default: ".release-please-manifest.json"
+    secrets:
+      GH_PAT_RELEASEPLEASE:
+        required: true
+    outputs:
+      releases_created:
+        description: "Whether any releases were created"
+        value: ${{ jobs.release-please.outputs.releases_created }}
+      release_created:
+        description: "Whether a single release was created (non-monorepo)"
+        value: ${{ jobs.release-please.outputs.release_created }}
+      tag_name:
+        description: "Release tag name (non-monorepo)"
+        value: ${{ jobs.release-please.outputs.tag_name }}
+      version:
+        description: "Release version (non-monorepo)"
+        value: ${{ jobs.release-please.outputs.version }}
+      pr:
+        description: "Release PR number"
+        value: ${{ jobs.release-please.outputs.pr }}
+      paths_released:
+        description: "JSON array of released paths (monorepo)"
+        value: ${{ jobs.release-please.outputs.paths_released }}
+      all:
+        description: "Full JSON output from release-please"
+        value: ${{ jobs.release-please.outputs.all }}
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      releases_created: ${{ steps.release.outputs.releases_created }}
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+      version: ${{ steps.release.outputs.version }}
+      pr: ${{ steps.release.outputs.pr }}
+      paths_released: ${{ steps.release.outputs.paths_released }}
+      all: ${{ toJSON(steps.release.outputs) }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
+          token: ${{ secrets.GH_PAT_RELEASEPLEASE }}
