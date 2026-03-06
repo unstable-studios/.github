@@ -32,7 +32,7 @@ jobs:
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
-          if ! echo "$PR_TITLE" | grep -qE '^chore(\(.+\))?: release'; then
+          if ! echo "$PR_TITLE" | grep -qE '^chore(\(release\))?: '; then
             echo "::error::Release PR title doesn't match expected pattern: $PR_TITLE"
             exit 1
           fi
