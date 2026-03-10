@@ -19,8 +19,12 @@ on:
         description: "Version string (e.g. from release-please)"
         type: string
         required: true
+      artifact-name:
+        description: "GitHub Actions artifact name to download (from actions/upload-artifact)"
+        type: string
+        required: true
       artifact-path:
-        description: "Path to the artifact file to upload"
+        description: "Path to the file within the downloaded artifact"
         type: string
         required: true
       filename:
@@ -69,6 +73,11 @@ jobs:
       artifact_id: ${{ steps.upload.outputs.artifact_id }}
       link_id: ${{ steps.upload.outputs.link_id }}
     steps:
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact-name }}
+
       - name: Publish artifact to Relay
         id: upload
         run: |
@@ -76,37 +85,42 @@ jobs:
           FILENAME="${INPUT_FILENAME:-$(basename "$ARTIFACT_PATH")}"
           LABEL="${INPUT_LABEL:-$INPUT_VERSION}"
 
+          if [ ! -f "$ARTIFACT_PATH" ]; then
+            echo "::error::Artifact file not found: $ARTIFACT_PATH"
+            exit 1
+          fi
+
           CURL_ARGS=(
-            -sf
+            -sSf --fail-with-body
             -X POST
             -H "Authorization: Bearer $RELAY_API_SECRET"
             -F "file=@${ARTIFACT_PATH}"
-            -F "org=${INPUT_ORG}"
-            -F "product=${INPUT_PRODUCT}"
-            -F "version=${INPUT_VERSION}"
-            -F "filename=${FILENAME}"
-            -F "label=${LABEL}"
-            -F "policy_type=${INPUT_POLICY_TYPE}"
+            --form-string "org=${INPUT_ORG}"
+            --form-string "product=${INPUT_PRODUCT}"
+            --form-string "version=${INPUT_VERSION}"
+            --form-string "filename=${FILENAME}"
+            --form-string "label=${LABEL}"
+            --form-string "policy_type=${INPUT_POLICY_TYPE}"
           )
 
           if [ -n "$INPUT_MAX_DOWNLOADS" ]; then
-            CURL_ARGS+=(-F "max_downloads=${INPUT_MAX_DOWNLOADS}")
+            CURL_ARGS+=(--form-string "max_downloads=${INPUT_MAX_DOWNLOADS}")
           fi
 
           if [ -n "$INPUT_EXPIRES_IN" ]; then
-            CURL_ARGS+=(-F "expires_in_seconds=${INPUT_EXPIRES_IN}")
+            CURL_ARGS+=(--form-string "expires_in_seconds=${INPUT_EXPIRES_IN}")
           fi
 
           if [ -n "$INPUT_CHECKSUM" ]; then
-            CURL_ARGS+=(-F "checksum_sha256=${INPUT_CHECKSUM}")
+            CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
           fi
 
           RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/publish")
 
           {
-            echo "download_url=$(echo "$RESPONSE" | jq -r '.download_url')"
-            echo "artifact_id=$(echo "$RESPONSE" | jq -r '.artifact.id')"
-            echo "link_id=$(echo "$RESPONSE" | jq -r '.link.id')"
+            echo "download_url=$(echo "$RESPONSE" | jq -e -r '.download_url')"
+            echo "artifact_id=$(echo "$RESPONSE" | jq -e -r '.artifact.id')"
+            echo "link_id=$(echo "$RESPONSE" | jq -e -r '.link.id')"
           } >> "$GITHUB_OUTPUT"
 
           echo "Published: $(echo "$RESPONSE" | jq -r '.download_url')"
