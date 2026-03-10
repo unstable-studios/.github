@@ -59,6 +59,10 @@ on:
         description: "Skip CI when PR only touches docs/non-code files"
         type: boolean
         default: true
+      registry-url:
+        description: "npm registry URL for authentication (e.g. https://npm.pkg.github.com for GitHub Packages)"
+        type: string
+        default: ""
     secrets:
       DOPPLER_TOKEN:
         required: false
@@ -110,10 +114,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url || '' }}
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Doppler
         if: inputs.doppler-project != ''
@@ -191,10 +198,13 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url || '' }}
           cache: pnpm
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Setup Doppler
         if: inputs.doppler-project != '' && inputs[matrix.script] != ''
