@@ -84,18 +84,19 @@ jobs:
           cache: pnpm
 
       - name: Check GitHub Packages lockfile config
-        if: inputs.registry-url != ''
         run: |
-          if [ -f .npmrc ] && grep -q 'npm.pkg.github.com' .npmrc && ! grep -q 'lockfile-include-tarball-url=true' .npmrc; then
-            echo "::error::.npmrc uses GitHub Packages but is missing lockfile-include-tarball-url=true"
-            echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
-            echo ""
-            echo "Fix: add 'lockfile-include-tarball-url=true' to .npmrc, then regenerate the lockfile:"
-            echo "  pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install"
-            echo ""
-            echo "See: https://github.com/pnpm/pnpm/issues/7579"
-            exit 1
-          fi
+          for npmrc in "$GITHUB_WORKSPACE/.npmrc" ".npmrc"; do
+            if [ -f "$npmrc" ] && grep -q 'npm.pkg.github.com' "$npmrc" && ! grep -q 'lockfile-include-tarball-url=true' "$npmrc"; then
+              echo "::error file=$npmrc::.npmrc uses GitHub Packages but is missing lockfile-include-tarball-url=true"
+              echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
+              echo ""
+              echo "Fix: add 'lockfile-include-tarball-url=true' to .npmrc, then regenerate the lockfile:"
+              echo "  pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install"
+              echo ""
+              echo "See: https://github.com/pnpm/pnpm/issues/7579"
+              exit 1
+            fi
+          done
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
