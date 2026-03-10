@@ -143,31 +143,37 @@ jobs:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
 
       - name: Sync Doppler to Wrangler
-        if: inputs.sync-doppler-secrets
+        if: inputs.sync-doppler-secrets && inputs.doppler-project != ''
         run: |
           # Fetch all Doppler secrets with metadata
           ALL=$(doppler secrets --json -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG")
 
+          # Build jq filter — empty exclude pattern means exclude nothing
+          if [ -n "$EXCLUDE_PATTERN" ]; then
+            FILTER='select(.key | test($exclude) | not)'
+          else
+            FILTER='.'
+          fi
+
           # Split by visibility, excluding CI-only keys
-          SECRETS=$(echo "$ALL" | jq -c --arg exclude "$EXCLUDE_PATTERN" '
+          SECRETS=$(echo "$ALL" | jq -c --arg exclude "$EXCLUDE_PATTERN" "
             with_entries(
-              select(.key | test($exclude) | not)
-              | select(.value.computedVisibility == "masked")
+              $FILTER
+              | select(.value.computedVisibility == \"masked\")
               | .value = .value.computed
-            )')
+            )")
 
           # Push masked values as wrangler secrets
           if [ "$(echo "$SECRETS" | jq 'length')" -gt 0 ]; then
             echo "$SECRETS" | pnpm exec wrangler secret bulk
           fi
 
-          # Write unmasked values as --var flags (one per line) for deploy step
-          echo "$ALL" | jq -r --arg exclude "$EXCLUDE_PATTERN" '
+          # Build --var args for unmasked values using NUL delimiter for safety
+          echo "$ALL" | jq -j --arg exclude "$EXCLUDE_PATTERN" "
             to_entries
-            | map(select(.key | test($exclude) | not)
-                  | select(.value.computedVisibility == "unmasked"))
-            | map("--var \(.key):\(.value.computed)")
-            | .[]' > /tmp/wrangler-var-flags.txt
+            | map($FILTER | select(.value.computedVisibility == \"unmasked\"))
+            | map(\"--var\u0000\" + .key + \":\" + .value.computed + \"\u0000\")
+            | .[]" > /tmp/wrangler-var-args.bin
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
           DOPPLER_CONFIG: ${{ inputs.doppler-config }}
@@ -186,16 +192,16 @@ jobs:
 
       - name: Deploy
         run: |
-          VAR_FLAGS=""
-          if [ -f /tmp/wrangler-var-flags.txt ] && [ -s /tmp/wrangler-var-flags.txt ]; then
-            VAR_FLAGS=$(tr '\n' ' ' < /tmp/wrangler-var-flags.txt)
+          ARGS=()
+          if [ -f /tmp/wrangler-var-args.bin ] && [ -s /tmp/wrangler-var-args.bin ]; then
+            while IFS= read -r -d '' arg; do
+              ARGS+=("$arg")
+            done < /tmp/wrangler-var-args.bin
           fi
           if [ -n "$DOPPLER_PROJECT" ]; then
-            # shellcheck disable=SC2086
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.wrangler-command }} $VAR_FLAGS
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.wrangler-command }} "${ARGS[@]}"
           else
-            # shellcheck disable=SC2086
-            ${{ inputs.wrangler-command }} $VAR_FLAGS
+            ${{ inputs.wrangler-command }} "${ARGS[@]}"
           fi
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
