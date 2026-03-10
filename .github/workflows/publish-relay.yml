@@ -1,0 +1,123 @@
+name: Publish to Relay
+
+on:
+  workflow_call:
+    inputs:
+      relay-url:
+        description: "Relay server base URL"
+        type: string
+        default: "https://relay.unstable-studios.com"
+      org:
+        description: "Organization slug in Relay"
+        type: string
+        required: true
+      product:
+        description: "Product slug in Relay"
+        type: string
+        required: true
+      version:
+        description: "Version string (e.g. from release-please)"
+        type: string
+        required: true
+      artifact-path:
+        description: "Path to the artifact file to upload"
+        type: string
+        required: true
+      filename:
+        description: "Override filename (defaults to basename of artifact-path)"
+        type: string
+        default: ""
+      label:
+        description: "Download link label (e.g. release tag or recipient)"
+        type: string
+        default: ""
+      policy-type:
+        description: "Link access policy: single, n_use, time_limited, unlimited"
+        type: string
+        default: "unlimited"
+      max-downloads:
+        description: "Max downloads (only for n_use policy)"
+        type: string
+        default: ""
+      expires-in-seconds:
+        description: "Link expiry in seconds (optional)"
+        type: string
+        default: ""
+      checksum-sha256:
+        description: "Pre-computed SHA-256 checksum (optional, server computes if omitted)"
+        type: string
+        default: ""
+    secrets:
+      RELAY_API_SECRET:
+        required: true
+    outputs:
+      download-url:
+        description: "Public download URL for the artifact"
+        value: ${{ jobs.publish.outputs.download_url }}
+      artifact-id:
+        description: "Relay artifact ID"
+        value: ${{ jobs.publish.outputs.artifact_id }}
+      link-id:
+        description: "Relay link ID"
+        value: ${{ jobs.publish.outputs.link_id }}
+
+jobs:
+  publish:
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    outputs:
+      download_url: ${{ steps.upload.outputs.download_url }}
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
+      link_id: ${{ steps.upload.outputs.link_id }}
+    steps:
+      - name: Publish artifact to Relay
+        id: upload
+        run: |
+          ARTIFACT_PATH="$INPUT_ARTIFACT_PATH"
+          FILENAME="${INPUT_FILENAME:-$(basename "$ARTIFACT_PATH")}"
+          LABEL="${INPUT_LABEL:-$INPUT_VERSION}"
+
+          CURL_ARGS=(
+            -sf
+            -X POST
+            -H "Authorization: Bearer $RELAY_API_SECRET"
+            -F "file=@${ARTIFACT_PATH}"
+            -F "org=${INPUT_ORG}"
+            -F "product=${INPUT_PRODUCT}"
+            -F "version=${INPUT_VERSION}"
+            -F "filename=${FILENAME}"
+            -F "label=${LABEL}"
+            -F "policy_type=${INPUT_POLICY_TYPE}"
+          )
+
+          if [ -n "$INPUT_MAX_DOWNLOADS" ]; then
+            CURL_ARGS+=(-F "max_downloads=${INPUT_MAX_DOWNLOADS}")
+          fi
+
+          if [ -n "$INPUT_EXPIRES_IN" ]; then
+            CURL_ARGS+=(-F "expires_in_seconds=${INPUT_EXPIRES_IN}")
+          fi
+
+          if [ -n "$INPUT_CHECKSUM" ]; then
+            CURL_ARGS+=(-F "checksum_sha256=${INPUT_CHECKSUM}")
+          fi
+
+          RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/publish")
+
+          echo "download_url=$(echo "$RESPONSE" | jq -r '.download_url')" >> "$GITHUB_OUTPUT"
+          echo "artifact_id=$(echo "$RESPONSE" | jq -r '.artifact.id')" >> "$GITHUB_OUTPUT"
+          echo "link_id=$(echo "$RESPONSE" | jq -r '.link.id')" >> "$GITHUB_OUTPUT"
+
+          echo "Published: $(echo "$RESPONSE" | jq -r '.download_url')"
+        env:
+          RELAY_URL: ${{ inputs.relay-url }}
+          RELAY_API_SECRET: ${{ secrets.RELAY_API_SECRET }}
+          INPUT_ARTIFACT_PATH: ${{ inputs.artifact-path }}
+          INPUT_FILENAME: ${{ inputs.filename }}
+          INPUT_ORG: ${{ inputs.org }}
+          INPUT_PRODUCT: ${{ inputs.product }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_LABEL: ${{ inputs.label }}
+          INPUT_POLICY_TYPE: ${{ inputs.policy-type }}
+          INPUT_MAX_DOWNLOADS: ${{ inputs.max-downloads }}
+          INPUT_EXPIRES_IN: ${{ inputs.expires-in-seconds }}
+          INPUT_CHECKSUM: ${{ inputs.checksum-sha256 }}
