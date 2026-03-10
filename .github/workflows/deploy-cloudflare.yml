@@ -47,6 +47,14 @@ on:
         description: "Doppler config environment"
         type: string
         default: "production"
+      sync-doppler-secrets:
+        description: "Sync Doppler secrets to Wrangler (masked→secrets, unmasked→vars). Replaces manual pre-deploy secret pushing."
+        type: boolean
+        default: false
+      doppler-exclude-keys:
+        description: "Regex pattern for Doppler keys to exclude from Wrangler sync (e.g. CI-only keys)"
+        type: string
+        default: "^(DOPPLER_|CLOUDFLARE_|GH_|AWS_)"
       registry-url:
         description: "npm registry URL for authentication (e.g. https://npm.pkg.github.com for GitHub Packages)"
         type: string
@@ -134,6 +142,43 @@ jobs:
           DOPPLER_CONFIG: ${{ inputs.doppler-config }}
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
 
+      - name: Sync Doppler to Wrangler
+        if: inputs.sync-doppler-secrets
+        id: doppler-sync
+        run: |
+          # Fetch all Doppler secrets with metadata
+          ALL=$(doppler secrets --json -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG")
+
+          # Split by visibility, excluding CI-only keys
+          SECRETS=$(echo "$ALL" | jq -c --arg exclude "$EXCLUDE_PATTERN" '
+            with_entries(
+              select(.key | test($exclude) | not)
+              | select(.value.computedVisibility == "masked")
+              | .value = .value.computed
+            )')
+
+          VARS=$(echo "$ALL" | jq -r --arg exclude "$EXCLUDE_PATTERN" '
+            to_entries
+            | map(select(.key | test($exclude) | not)
+                  | select(.value.computedVisibility == "unmasked"))
+            | map("--var \(.key):\(.value.computed)")
+            | join(" ")')
+
+          # Push masked values as wrangler secrets
+          if [ "$(echo "$SECRETS" | jq 'length')" -gt 0 ]; then
+            echo "$SECRETS" | pnpm exec wrangler secret bulk
+          fi
+
+          # Store var flags for deploy step
+          echo "var_flags=$VARS" >> "$GITHUB_OUTPUT"
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          EXCLUDE_PATTERN: ${{ inputs.doppler-exclude-keys }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
       - name: Pre-deploy
         if: inputs.pre-deploy-script != ''
         run: ${{ inputs.pre-deploy-script }}
@@ -144,10 +189,14 @@ jobs:
 
       - name: Deploy
         run: |
+          DEPLOY_CMD="${{ inputs.wrangler-command }}"
+          if [ -n "$VAR_FLAGS" ]; then
+            DEPLOY_CMD="$DEPLOY_CMD $VAR_FLAGS"
+          fi
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.wrangler-command }}
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- $DEPLOY_CMD
           else
-            ${{ inputs.wrangler-command }}
+            $DEPLOY_CMD
           fi
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
@@ -155,6 +204,7 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+          VAR_FLAGS: ${{ steps.doppler-sync.outputs.var_flags }}
 
       - name: Post-deploy
         if: inputs.post-deploy-script != ''
