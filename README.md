@@ -13,6 +13,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
 | [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + migrations | `migration-command`, `doppler-project`, scripts |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
+| [`publish-relay.yml`](.github/workflows/publish-relay.yml) | Publish release artifacts to Relay | `org`, `product`, `version`, `artifact-name`, `artifact-path`, `policy-type` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
 
 ## Usage
@@ -113,6 +114,44 @@ jobs:
       post-plan-comment: true
     secrets: inherit
 ```
+
+### Publish Artifact to Relay
+
+The publish workflow expects a GitHub Actions artifact (from `actions/upload-artifact`). A prior job must build the file and upload it:
+
+```yaml
+jobs:
+  release:
+    uses: unstable-studios/.github/.github/workflows/release-please.yml@main
+    secrets: inherit
+
+  build:
+    needs: release
+    if: needs.release.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: pnpm install --frozen-lockfile && pnpm build
+      - uses: actions/upload-artifact@v4
+        with:
+          name: my-app-release
+          path: dist/my-app.zip
+
+  publish:
+    needs: [release, build]
+    uses: unstable-studios/.github/.github/workflows/publish-relay.yml@main
+    with:
+      org: "unstable-studios"
+      product: "my-app"
+      version: ${{ needs.release.outputs.version }}
+      artifact-name: "my-app-release"
+      artifact-path: "my-app.zip"
+      policy-type: "unlimited"
+    secrets:
+      RELAY_API_SECRET: ${{ secrets.RELAY_API_SECRET }}
+```
+
+Outputs `download-url`, `artifact-id`, and `link-id` for downstream jobs. Set `RELAY_API_SECRET` as a repo or org secret.
 
 ### Custom Overrides (e.g. Electron)
 
