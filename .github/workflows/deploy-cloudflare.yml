@@ -144,24 +144,19 @@ jobs:
 
       - name: Sync Doppler to Wrangler
         if: inputs.sync-doppler-secrets && inputs.doppler-project != ''
+        shell: bash
         run: |
+          # shellcheck disable=SC2016
           # Fetch all Doppler secrets with metadata
           ALL=$(doppler secrets --json -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG")
 
-          # Build jq filter — empty exclude pattern means exclude nothing
-          if [ -n "$EXCLUDE_PATTERN" ]; then
-            FILTER='select(.key | test($exclude) | not)'
-          else
-            FILTER='.'
-          fi
-
-          # Split by visibility, excluding CI-only keys
-          SECRETS=$(echo "$ALL" | jq -c --arg exclude "$EXCLUDE_PATTERN" "
+          # Extract masked values as wrangler secrets (excluding CI-only keys)
+          SECRETS=$(echo "$ALL" | jq -c --arg exclude "$EXCLUDE_PATTERN" '
             with_entries(
-              $FILTER
-              | select(.value.computedVisibility == \"masked\")
+              select(if ($exclude | length) > 0 then (.key | test($exclude) | not) else true end)
+              | select(.value.computedVisibility == "masked")
               | .value = .value.computed
-            )")
+            )')
 
           # Push masked values as wrangler secrets
           if [ "$(echo "$SECRETS" | jq 'length')" -gt 0 ]; then
@@ -169,11 +164,12 @@ jobs:
           fi
 
           # Build --var args for unmasked values using NUL delimiter for safety
-          echo "$ALL" | jq -j --arg exclude "$EXCLUDE_PATTERN" "
+          echo "$ALL" | jq -j --arg exclude "$EXCLUDE_PATTERN" '
             to_entries
-            | map($FILTER | select(.value.computedVisibility == \"unmasked\"))
-            | map(\"--var\u0000\" + .key + \":\" + .value.computed + \"\u0000\")
-            | .[]" > /tmp/wrangler-var-args.bin
+            | map(select(if ($exclude | length) > 0 then (.key | test($exclude) | not) else true end)
+                  | select(.value.computedVisibility == "unmasked"))
+            | map("--var\u0000" + .key + ":" + .value.computed + "\u0000")
+            | .[]' > /tmp/wrangler-var-args.bin
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
           DOPPLER_CONFIG: ${{ inputs.doppler-config }}
