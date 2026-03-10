@@ -103,9 +103,11 @@ jobs:
 
           RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/publish")
 
-          echo "download_url=$(echo "$RESPONSE" | jq -r '.download_url')" >> "$GITHUB_OUTPUT"
-          echo "artifact_id=$(echo "$RESPONSE" | jq -r '.artifact.id')" >> "$GITHUB_OUTPUT"
-          echo "link_id=$(echo "$RESPONSE" | jq -r '.link.id')" >> "$GITHUB_OUTPUT"
+          {
+            echo "download_url=$(echo "$RESPONSE" | jq -r '.download_url')"
+            echo "artifact_id=$(echo "$RESPONSE" | jq -r '.artifact.id')"
+            echo "link_id=$(echo "$RESPONSE" | jq -r '.link.id')"
+          } >> "$GITHUB_OUTPUT"
 
           echo "Published: $(echo "$RESPONSE" | jq -r '.download_url')"
         env:
