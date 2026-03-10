@@ -105,9 +105,7 @@ jobs:
 
       - name: Setup Doppler
         if: inputs.doppler-project != ''
-        uses: dopplerhq/cli-action@v3
-        with:
-          version: latest
+        uses: dopplerhq/cli-action@v4
 
       - name: Run migrations
         if: inputs.migration-command != ''
