@@ -57,6 +57,7 @@ jobs:
         run: |
           shopt -s nullglob
 
+          # shellcheck disable=SC2206
           FILES=($INPUT_ARTIFACT_PATH)
 
           if [ ${#FILES[@]} -eq 0 ]; then
@@ -66,6 +67,7 @@ jobs:
 
           echo "Found ${#FILES[@]} file(s) to upload"
           ARTIFACT_IDS=()
+          FILE_COUNT=${#FILES[@]}
 
           for FILE in "${FILES[@]}"; do
             if [ ! -f "$FILE" ]; then
@@ -74,7 +76,8 @@ jobs:
             fi
 
             FILENAME=$(basename "$FILE")
-            echo "Uploading $FILENAME ($(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE") bytes)..."
+            SIZE=$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE")
+            echo "Uploading $FILENAME ($SIZE bytes)..."
 
             CURL_ARGS=(
               -sSf --fail-with-body
@@ -87,7 +90,7 @@ jobs:
             )
 
             # Only pass checksum for single-file uploads
-            if [ ${#FILES[@]} -eq 1 ] && [ -n "$INPUT_CHECKSUM" ]; then
+            if [ "$FILE_COUNT" -eq 1 ] && [ -n "$INPUT_CHECKSUM" ]; then
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
