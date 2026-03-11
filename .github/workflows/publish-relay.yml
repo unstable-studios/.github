@@ -80,7 +80,7 @@ jobs:
             echo "Uploading $FILENAME ($SIZE bytes)..."
 
             CURL_ARGS=(
-              -sSf --fail-with-body
+              -sS --fail-with-body
               -X POST
               -H "Authorization: Bearer $RELAY_API_SECRET"
               -F "file=@${FILE}"
@@ -95,7 +95,7 @@ jobs:
             fi
 
             RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/artifacts")
-            ID=$(echo "$RESPONSE" | jq -e -r '.id')
+            ID=$(echo "$RESPONSE" | jq -e -r '.artifact.id')
             ARTIFACT_IDS+=("$ID")
             echo "  -> artifact $ID"
           done
