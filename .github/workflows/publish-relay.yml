@@ -6,7 +6,7 @@ on:
       relay-url:
         description: "Relay server base URL"
         type: string
-        default: "https://relay.unstable-studios.com"
+        default: "https://relay.unstablestudios.com"
       org:
         description: "Organization slug in Relay (auto-created if new)"
         type: string
