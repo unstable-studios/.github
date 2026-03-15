@@ -33,6 +33,14 @@ on:
         description: "Pre-computed SHA-256 checksum (single file only; server computes if omitted)"
         type: string
         default: ""
+      file-names:
+        description: >
+          Optional JSON object mapping filename to display name.
+          Keys are filenames (basename, not path). Files not in the
+          map get a display name auto-generated from their filename.
+          Example: {"app.dmg": "macOS Installer", "guide.pdf": "Deployment Guide"}
+        type: string
+        default: ""
     secrets:
       RELAY_API_SECRET:
         required: true
@@ -65,6 +73,14 @@ jobs:
             exit 1
           fi
 
+          # Validate file-names JSON if provided
+          if [ -n "$INPUT_FILE_NAMES" ]; then
+            if ! printf '%s' "$INPUT_FILE_NAMES" | jq -e . >/dev/null 2>&1; then
+              echo "::error::file-names input is not valid JSON"
+              exit 1
+            fi
+          fi
+
           echo "Found ${#FILES[@]} file(s) to upload"
           FILE_IDS=()
           FILE_COUNT=${#FILES[@]}
@@ -94,10 +110,19 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
+            # Pass display name only if explicitly provided in the JSON map.
+            # When omitted, the server auto-generates from the filename.
+            if [ -n "$INPUT_FILE_NAMES" ]; then
+              DISPLAY_NAME=$(printf '%s' "$INPUT_FILE_NAMES" | jq -e -r --arg k "$FILENAME" '.[$k] // empty' 2>/dev/null || true)
+              if [ -n "$DISPLAY_NAME" ]; then
+                CURL_ARGS+=(--form-string "name=${DISPLAY_NAME}")
+              fi
+            fi
+
             RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/files")
             ID=$(echo "$RESPONSE" | jq -e -r '.file.id')
             FILE_IDS+=("$ID")
-            echo "  -> file $ID"
+            echo "  -> file $ID (name: ${DISPLAY_NAME:-<auto>})"
           done
 
           IDS_CSV=$(IFS=,; echo "${FILE_IDS[*]}")
@@ -111,3 +136,4 @@ jobs:
           INPUT_PRODUCT: ${{ inputs.product }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_CHECKSUM: ${{ inputs.checksum-sha256 }}
+          INPUT_FILE_NAMES: ${{ inputs.file-names }}
