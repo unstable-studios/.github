@@ -33,6 +33,10 @@ on:
         description: "Pre-computed SHA-256 checksum (single file only; server computes if omitted)"
         type: string
         default: ""
+      file-name:
+        description: "Display name for the uploaded file (auto-generated from filename if omitted)"
+        type: string
+        default: ""
     secrets:
       RELAY_API_SECRET:
         required: true
@@ -94,6 +98,11 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
+            # Pass display name if provided
+            if [ -n "$INPUT_FILE_NAME" ]; then
+              CURL_ARGS+=(--form-string "name=${INPUT_FILE_NAME}")
+            fi
+
             RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/files")
             ID=$(echo "$RESPONSE" | jq -e -r '.file.id')
             FILE_IDS+=("$ID")
@@ -111,3 +120,4 @@ jobs:
           INPUT_PRODUCT: ${{ inputs.product }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_CHECKSUM: ${{ inputs.checksum-sha256 }}
+          INPUT_FILE_NAME: ${{ inputs.file-name }}
