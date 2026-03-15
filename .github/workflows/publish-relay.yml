@@ -98,8 +98,8 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
-            # Pass display name if provided
-            if [ -n "$INPUT_FILE_NAME" ]; then
+            # Only pass display name for single-file uploads (multi-file: server auto-generates per file)
+            if [ "$FILE_COUNT" -eq 1 ] && [ -n "$INPUT_FILE_NAME" ]; then
               CURL_ARGS+=(--form-string "name=${INPUT_FILE_NAME}")
             fi
 
