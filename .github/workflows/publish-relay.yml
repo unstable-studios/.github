@@ -37,15 +37,15 @@ on:
       RELAY_API_SECRET:
         required: true
     outputs:
-      artifact-ids:
-        description: "Comma-separated list of Relay artifact IDs"
-        value: ${{ jobs.upload.outputs.artifact_ids }}
+      file-ids:
+        description: "Comma-separated list of Relay file IDs"
+        value: ${{ jobs.upload.outputs.file_ids }}
 
 jobs:
   upload:
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
     outputs:
-      artifact_ids: ${{ steps.publish.outputs.artifact_ids }}
+      file_ids: ${{ steps.publish.outputs.file_ids }}
     steps:
       - name: Download artifact
         uses: actions/download-artifact@v4
@@ -66,7 +66,7 @@ jobs:
           fi
 
           echo "Found ${#FILES[@]} file(s) to upload"
-          ARTIFACT_IDS=()
+          FILE_IDS=()
           FILE_COUNT=${#FILES[@]}
 
           for FILE in "${FILES[@]}"; do
@@ -94,15 +94,15 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
-            RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/artifacts")
-            ID=$(echo "$RESPONSE" | jq -e -r '.artifact.id')
-            ARTIFACT_IDS+=("$ID")
-            echo "  -> artifact $ID"
+            RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/files")
+            ID=$(echo "$RESPONSE" | jq -e -r '.file.id')
+            FILE_IDS+=("$ID")
+            echo "  -> file $ID"
           done
 
-          IDS_CSV=$(IFS=,; echo "${ARTIFACT_IDS[*]}")
-          echo "artifact_ids=$IDS_CSV" >> "$GITHUB_OUTPUT"
-          echo "Uploaded ${#ARTIFACT_IDS[@]} artifact(s): $IDS_CSV"
+          IDS_CSV=$(IFS=,; echo "${FILE_IDS[*]}")
+          echo "file_ids=$IDS_CSV" >> "$GITHUB_OUTPUT"
+          echo "Uploaded ${#FILE_IDS[@]} file(s): $IDS_CSV"
         env:
           RELAY_URL: ${{ inputs.relay-url }}
           RELAY_API_SECRET: ${{ secrets.RELAY_API_SECRET }}
