@@ -73,6 +73,14 @@ jobs:
             exit 1
           fi
 
+          # Validate file-names JSON if provided
+          if [ -n "$INPUT_FILE_NAMES" ]; then
+            if ! printf '%s' "$INPUT_FILE_NAMES" | jq -e . >/dev/null 2>&1; then
+              echo "::error::file-names input is not valid JSON"
+              exit 1
+            fi
+          fi
+
           echo "Found ${#FILES[@]} file(s) to upload"
           FILE_IDS=()
           FILE_COUNT=${#FILES[@]}
@@ -102,16 +110,13 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
-            # Resolve display name: check JSON map first, then auto-generate
-            DISPLAY_NAME=""
+            # Pass display name only if explicitly provided in the JSON map.
+            # When omitted, the server auto-generates from the filename.
             if [ -n "$INPUT_FILE_NAMES" ]; then
-              DISPLAY_NAME=$(echo "$INPUT_FILE_NAMES" | jq -e -r --arg k "$FILENAME" '.[$k] // empty' 2>/dev/null || true)
-            fi
-            if [ -z "$DISPLAY_NAME" ]; then
-              DISPLAY_NAME=$(echo "${FILENAME%.*}" | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
-            fi
-            if [ -n "$DISPLAY_NAME" ]; then
-              CURL_ARGS+=(--form-string "name=${DISPLAY_NAME}")
+              DISPLAY_NAME=$(printf '%s' "$INPUT_FILE_NAMES" | jq -e -r --arg k "$FILENAME" '.[$k] // empty' 2>/dev/null || true)
+              if [ -n "$DISPLAY_NAME" ]; then
+                CURL_ARGS+=(--form-string "name=${DISPLAY_NAME}")
+              fi
             fi
 
             RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/files")
