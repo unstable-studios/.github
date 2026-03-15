@@ -34,7 +34,7 @@ on:
         type: string
         default: ""
       file-name:
-        description: "Display name for the uploaded file (auto-generated from filename if omitted)"
+        description: "Display name override (single-file only). For multi-file uploads, each file gets a name auto-generated from its filename."
         type: string
         default: ""
     secrets:
@@ -98,9 +98,15 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
-            # Only pass display name for single-file uploads (multi-file: server auto-generates per file)
+            # Generate display name: use explicit input (single-file only), otherwise derive from filename
             if [ "$FILE_COUNT" -eq 1 ] && [ -n "$INPUT_FILE_NAME" ]; then
               CURL_ARGS+=(--form-string "name=${INPUT_FILE_NAME}")
+            else
+              # Strip extension, replace hyphens/underscores with spaces, title case
+              DISPLAY_NAME=$(echo "${FILENAME%.*}" | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
+              if [ -n "$DISPLAY_NAME" ]; then
+                CURL_ARGS+=(--form-string "name=${DISPLAY_NAME}")
+              fi
             fi
 
             RESPONSE=$(curl "${CURL_ARGS[@]}" "${RELAY_URL}/api/v1/files")
