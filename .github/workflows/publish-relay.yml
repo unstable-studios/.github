@@ -33,8 +33,12 @@ on:
         description: "Pre-computed SHA-256 checksum (single file only; server computes if omitted)"
         type: string
         default: ""
-      file-name:
-        description: "Display name override (single-file only). For multi-file uploads, each file gets a name auto-generated from its filename."
+      file-names:
+        description: >
+          Display names for uploaded files (newline-separated, positional).
+          Each line maps to the corresponding file matched by artifact-path.
+          Omitted or blank lines auto-generate from the filename.
+          Example: "Deployment Guide\nRelease Notes"
         type: string
         default: ""
     secrets:
@@ -69,13 +73,18 @@ jobs:
             exit 1
           fi
 
+          # Parse newline-separated display names into an array
+          IFS=$'\n' read -r -d '' -a NAMES <<< "$INPUT_FILE_NAMES" || true
+
           echo "Found ${#FILES[@]} file(s) to upload"
           FILE_IDS=()
           FILE_COUNT=${#FILES[@]}
+          IDX=0
 
           for FILE in "${FILES[@]}"; do
             if [ ! -f "$FILE" ]; then
               echo "::warning::Skipping non-file: $FILE"
+              IDX=$((IDX + 1))
               continue
             fi
 
@@ -98,9 +107,10 @@ jobs:
               CURL_ARGS+=(--form-string "checksum_sha256=${INPUT_CHECKSUM}")
             fi
 
-            # Generate display name: use explicit input (single-file only), otherwise derive from filename
-            if [ "$FILE_COUNT" -eq 1 ] && [ -n "$INPUT_FILE_NAME" ]; then
-              CURL_ARGS+=(--form-string "name=${INPUT_FILE_NAME}")
+            # Display name: use positional name if provided, otherwise auto-generate
+            EXPLICIT_NAME="${NAMES[$IDX]:-}"
+            if [ -n "$EXPLICIT_NAME" ]; then
+              CURL_ARGS+=(--form-string "name=${EXPLICIT_NAME}")
             else
               # Strip extension, replace hyphens/underscores with spaces, title case
               DISPLAY_NAME=$(echo "${FILENAME%.*}" | sed 's/[-_]/ /g' | awk '{for(i=1;i<=NF;i++) $i=toupper(substr($i,1,1)) tolower(substr($i,2))}1')
@@ -113,6 +123,7 @@ jobs:
             ID=$(echo "$RESPONSE" | jq -e -r '.file.id')
             FILE_IDS+=("$ID")
             echo "  -> file $ID"
+            IDX=$((IDX + 1))
           done
 
           IDS_CSV=$(IFS=,; echo "${FILE_IDS[*]}")
@@ -126,4 +137,4 @@ jobs:
           INPUT_PRODUCT: ${{ inputs.product }}
           INPUT_VERSION: ${{ inputs.version }}
           INPUT_CHECKSUM: ${{ inputs.checksum-sha256 }}
-          INPUT_FILE_NAME: ${{ inputs.file-name }}
+          INPUT_FILE_NAMES: ${{ inputs.file-names }}
