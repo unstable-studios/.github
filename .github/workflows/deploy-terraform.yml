@@ -96,7 +96,7 @@ jobs:
 
       - name: Post plan comment
         if: inputs.post-plan-comment && inputs.plan-only && github.event_name == 'pull_request'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         env:
           PLAN_FILE: ${{ inputs.working-directory }}/plan.txt
           TF_DIR: ${{ inputs.working-directory }}
