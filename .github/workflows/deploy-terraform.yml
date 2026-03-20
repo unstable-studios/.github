@@ -85,7 +85,7 @@ jobs:
         id: plan
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform plan -no-color -out="$GITHUB_WORKSPACE/tfplan" 2>&1 | tee plan.txt
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- terraform plan -no-color -out="$GITHUB_WORKSPACE/tfplan" 2>&1 | tee plan.txt
           else
             terraform plan -no-color -out="$GITHUB_WORKSPACE/tfplan" 2>&1 | tee plan.txt
           fi
@@ -150,7 +150,7 @@ jobs:
         if: ${{ !inputs.plan-only }}
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform apply -auto-approve "$GITHUB_WORKSPACE/tfplan"
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- terraform apply -auto-approve "$GITHUB_WORKSPACE/tfplan"
           else
             terraform apply -auto-approve "$GITHUB_WORKSPACE/tfplan"
           fi
