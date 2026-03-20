@@ -15,7 +15,7 @@ jobs:
       startsWith(github.head_ref, 'release-please')
       || github.actor == 'release-please[bot]'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Validate manifest exists
         run: |
