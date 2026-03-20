@@ -72,7 +72,7 @@ jobs:
       - name: Terraform init
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform init
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- terraform init
           else
             terraform init
           fi
