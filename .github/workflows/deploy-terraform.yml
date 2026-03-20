@@ -72,7 +72,7 @@ jobs:
       - name: Terraform init
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform init
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- terraform init
           else
             terraform init
           fi
@@ -85,9 +85,9 @@ jobs:
         id: plan
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform plan -no-color -out=tfplan 2>&1 | tee plan.txt
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform plan -no-color -out="$GITHUB_WORKSPACE/tfplan" 2>&1 | tee plan.txt
           else
-            terraform plan -no-color -out=tfplan 2>&1 | tee plan.txt
+            terraform plan -no-color -out="$GITHUB_WORKSPACE/tfplan" 2>&1 | tee plan.txt
           fi
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
@@ -150,9 +150,9 @@ jobs:
         if: ${{ !inputs.plan-only }}
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
-            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform apply -auto-approve tfplan
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" --name-transformer tf-var -- terraform apply -auto-approve "$GITHUB_WORKSPACE/tfplan"
           else
-            terraform apply -auto-approve tfplan
+            terraform apply -auto-approve "$GITHUB_WORKSPACE/tfplan"
           fi
         env:
           DOPPLER_PROJECT: ${{ inputs.doppler-project }}
