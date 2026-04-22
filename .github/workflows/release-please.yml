@@ -53,7 +53,7 @@ jobs:
       paths_released: ${{ steps.release.outputs.paths_released }}
       all: ${{ toJSON(steps.release.outputs) }}
     steps:
-      - uses: googleapis/release-please-action@v4
+      - uses: googleapis/release-please-action@v5
         id: release
         with:
           config-file: ${{ inputs.config-file }}
