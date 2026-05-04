@@ -56,7 +56,7 @@ jobs:
       file_ids: ${{ steps.publish.outputs.file_ids }}
     steps:
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: ${{ inputs.artifact-name }}
 
