@@ -81,15 +81,29 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: ${{ inputs.pnpm-version }}
-
+      # setup-node runs before pnpm/action-setup so the v6 self-installer runs
+      # on the setup-node Node, not the runner default. cache: pnpm can't be
+      # used in this order (pnpm isn't installed yet), so the store is cached
+      # explicitly below.
       - uses: actions/setup-node@v6
         with:
           node-version: ${{ inputs.node-version }}
           registry-url: ${{ inputs.registry-url || '' }}
-          cache: pnpm
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ inputs.pnpm-version }}
+
+      - name: Locate pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v5
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
 
       - name: Check GitHub Packages lockfile config
         run: |
