@@ -39,7 +39,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # setup-node runs before pnpm/action-setup so the v6 self-installer runs
       # on the setup-node Node, not the runner default. cache: pnpm can't be
