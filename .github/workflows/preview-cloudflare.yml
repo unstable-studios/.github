@@ -19,7 +19,7 @@ on:
         description: "Build command before upload (empty to skip)"
         type: string
         default: ""
-      wrangler-command:
+      wrangler-subcommand:
         description: "Wrangler subcommand producing a preview URL. Passed to wrangler-action, which supplies the `pnpm exec wrangler` prefix itself — so this is 'versions upload', not the full invocation used by deploy-cloudflare.yml."
         type: string
         default: "versions upload"
@@ -63,6 +63,11 @@ concurrency:
 
 jobs:
   preview:
+    # Fork PRs get no secrets and a read-only token, so the upload would fail
+    # at the wrangler step and the comment step couldn't post. Skip cleanly.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
     permissions:
       contents: read
@@ -73,13 +78,13 @@ jobs:
     outputs:
       preview-url: ${{ steps.upload.outputs.deployment-url }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
 
       # setup-node runs before pnpm/action-setup so the v6 self-installer runs
       # on the setup-node Node, not the runner default. cache: pnpm can't be
       # used in this order (pnpm isn't installed yet), so the store is cached
       # explicitly below.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
           registry-url: ${{ inputs.registry-url || '' }}
@@ -112,7 +117,7 @@ jobs:
         run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
       - name: Cache pnpm store
-        uses: actions/cache@v5
+        uses: actions/cache@v6
         with:
           path: ${{ steps.pnpm-store.outputs.path }}
           key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
@@ -167,7 +172,7 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           workingDirectory: ${{ inputs.working-directory }}
           packageManager: pnpm
-          command: ${{ inputs.wrangler-command }}
+          command: ${{ inputs.wrangler-subcommand }}
 
       - name: Comment preview URL on PR
         if: >-
@@ -183,7 +188,9 @@ jobs:
             const marker = process.env.COMMENT_MARKER;
             const sha = context.payload.pull_request.head.sha.slice(0, 7);
             const body = `${marker}\n**Cloudflare preview:** ${process.env.PREVIEW_URL}\n\n_Updated for ${sha}._`;
-            const { data: comments } = await github.rest.issues.listComments({
+            // Paginate: the marker comment can fall past the first page on a
+            // long PR, and missing it would create a duplicate every push.
+            const comments = await github.paginate(github.rest.issues.listComments, {
               ...context.repo, issue_number: context.issue.number,
             });
             const existing = comments.find(c => c.body && c.body.includes(marker));
