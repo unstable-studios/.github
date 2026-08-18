@@ -80,63 +80,15 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      # setup-node runs before pnpm/action-setup so the v6 self-installer runs
-      # on the setup-node Node, not the runner default. cache: pnpm can't be
-      # used in this order (pnpm isn't installed yet), so the store is cached
-      # explicitly below.
-      - uses: actions/setup-node@v7
+      # Shared setup: setup-node -> packageManager-aware pnpm version
+      # resolution -> pnpm/action-setup -> store cache -> GitHub Packages
+      # lockfile guard. See .github/actions/setup-pnpm.
+      - uses: unstable-studios/.github/.github/actions/setup-pnpm@main
         with:
           node-version: ${{ inputs.node-version }}
+          pnpm-version: ${{ inputs.pnpm-version }}
           registry-url: ${{ inputs.registry-url || '' }}
-
-      # pnpm/action-setup aborts with "Multiple versions of pnpm specified"
-      # when both its `version` input and a package.json `packageManager` field
-      # are set. Defer to `packageManager` when the caller uses it (the Corepack
-      # convention) and fall back to the input otherwise. Checks the root
-      # package.json because that is the file the action itself reads,
-      # regardless of any working-directory default.
-      - name: Resolve pnpm version
-        id: pnpm-version
-        run: |
-          PKG="$GITHUB_WORKSPACE/package.json"
-          if [ -f "$PKG" ] && PKG="$PKG" node -e 'const p = require(process.env.PKG); process.exit(typeof p.packageManager === "string" && p.packageManager.startsWith("pnpm@") ? 0 : 1)'; then
-            echo "Using pnpm version from package.json packageManager"
-            echo "version=" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=$PNPM_VERSION" >> "$GITHUB_OUTPUT"
-          fi
-        env:
-          PNPM_VERSION: ${{ inputs.pnpm-version }}
-
-      - uses: pnpm/action-setup@v6
-        with:
-          version: ${{ steps.pnpm-version.outputs.version }}
-
-      - name: Locate pnpm store
-        id: pnpm-store
-        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
-
-      - name: Cache pnpm store
-        uses: actions/cache@v6
-        with:
-          path: ${{ steps.pnpm-store.outputs.path }}
-          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
-          restore-keys: pnpm-store-${{ runner.os }}-
-
-      - name: Check GitHub Packages lockfile config
-        run: |
-          for npmrc in "$GITHUB_WORKSPACE/.npmrc" ".npmrc"; do
-            if [ -f "$npmrc" ] && grep -q 'npm.pkg.github.com' "$npmrc" && ! grep -q 'lockfile-include-tarball-url=true' "$npmrc"; then
-              echo "::error file=$npmrc::.npmrc uses GitHub Packages but is missing lockfile-include-tarball-url=true"
-              echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
-              echo ""
-              echo "Fix: add 'lockfile-include-tarball-url=true' to .npmrc, then regenerate the lockfile:"
-              echo "  pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install"
-              echo ""
-              echo "See: https://github.com/pnpm/pnpm/issues/7579"
-              exit 1
-            fi
-          done
+          working-directory: ${{ inputs.working-directory }}
 
       # wrangler-action falls back to its own bundled wrangler when
       # node_modules is absent, and that copy can be too old to read

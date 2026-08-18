@@ -8,6 +8,7 @@ This is the **org-level `.github` repo** for Unstable Studios. It contains reusa
 
 ```
 .github/workflows/     # Reusable workflows (workflow_call trigger)
+.github/actions/       # Composite actions shared by the workflows (e.g. setup-pnpm)
 README.md              # Usage docs and examples
 ```
 
