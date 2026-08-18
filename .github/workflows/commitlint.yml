@@ -42,7 +42,7 @@ jobs:
         id: pnpm-version
         run: |
           PKG="$GITHUB_WORKSPACE/package.json"
-          if [ -f "$PKG" ] && grep -qE '"packageManager"[[:space:]]*:[[:space:]]*"pnpm@' "$PKG"; then
+          if [ -f "$PKG" ] && PKG="$PKG" node -e 'const p = require(process.env.PKG); process.exit(typeof p.packageManager === "string" && p.packageManager.startsWith("pnpm@") ? 0 : 1)'; then
             echo "Using pnpm version from package.json packageManager"
             echo "version=" >> "$GITHUB_OUTPUT"
           else
