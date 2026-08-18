@@ -45,7 +45,7 @@ jobs:
       # on the setup-node Node, not the runner default. cache: pnpm can't be
       # used in this order (pnpm isn't installed yet), so the store is cached
       # explicitly below.
-      - uses: actions/setup-node@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ inputs.node-version }}
           registry-url: ${{ inputs.registry-url }}
