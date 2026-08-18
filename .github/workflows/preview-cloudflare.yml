@@ -1,0 +1,201 @@
+name: Preview Cloudflare
+
+on:
+  workflow_call:
+    inputs:
+      node-version:
+        description: "Node.js version"
+        type: string
+        default: "22"
+      pnpm-version:
+        description: "pnpm version"
+        type: string
+        default: "10"
+      working-directory:
+        description: "Working directory for wrangler"
+        type: string
+        default: "."
+      build-script:
+        description: "Build command before upload (empty to skip)"
+        type: string
+        default: ""
+      wrangler-subcommand:
+        description: "Wrangler subcommand producing a preview URL. Passed to wrangler-action, which supplies the `pnpm exec wrangler` prefix itself — so this is 'versions upload', not the full invocation used by deploy-cloudflare.yml."
+        type: string
+        default: "versions upload"
+      comment-on-pr:
+        description: "Post/update a PR comment with the preview URL"
+        type: boolean
+        default: true
+      comment-marker:
+        description: "Hidden HTML marker identifying the comment to update, so repeat runs edit rather than pile up"
+        type: string
+        default: "<!-- cf-preview-url -->"
+      doppler-project:
+        description: "Doppler project name (empty to skip Doppler)"
+        type: string
+        default: ""
+      doppler-config:
+        description: "Doppler config environment"
+        type: string
+        default: "preview"
+      registry-url:
+        description: "npm registry URL for authentication (e.g. https://npm.pkg.github.com for GitHub Packages)"
+        type: string
+        default: ""
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+      DOPPLER_TOKEN:
+        required: false
+    outputs:
+      preview-url:
+        description: "Versioned Cloudflare preview URL"
+        value: ${{ jobs.preview.outputs.preview-url }}
+
+# Unlike deploy, superseded previews are worth cancelling — only the latest
+# commit on a PR is interesting.
+concurrency:
+  group: preview-cloudflare-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preview:
+    # Fork PRs get no secrets and a read-only token, so the upload would fail
+    # at the wrangler step and the comment step couldn't post. Skip cleanly.
+    if: >-
+      github.event_name != 'pull_request'
+      || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ${{ vars.RUNS_ON || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+      pull-requests: write
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    outputs:
+      preview-url: ${{ steps.upload.outputs.deployment-url }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # setup-node runs before pnpm/action-setup so the v6 self-installer runs
+      # on the setup-node Node, not the runner default. cache: pnpm can't be
+      # used in this order (pnpm isn't installed yet), so the store is cached
+      # explicitly below.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: ${{ inputs.node-version }}
+          registry-url: ${{ inputs.registry-url || '' }}
+
+      # pnpm/action-setup aborts with "Multiple versions of pnpm specified"
+      # when both its `version` input and a package.json `packageManager` field
+      # are set. Defer to `packageManager` when the caller uses it (the Corepack
+      # convention) and fall back to the input otherwise. Checks the root
+      # package.json because that is the file the action itself reads,
+      # regardless of any working-directory default.
+      - name: Resolve pnpm version
+        id: pnpm-version
+        run: |
+          PKG="$GITHUB_WORKSPACE/package.json"
+          if [ -f "$PKG" ] && PKG="$PKG" node -e 'const p = require(process.env.PKG); process.exit(typeof p.packageManager === "string" && p.packageManager.startsWith("pnpm@") ? 0 : 1)'; then
+            echo "Using pnpm version from package.json packageManager"
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=$PNPM_VERSION" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          PNPM_VERSION: ${{ inputs.pnpm-version }}
+
+      - uses: pnpm/action-setup@v6
+        with:
+          version: ${{ steps.pnpm-version.outputs.version }}
+
+      - name: Locate pnpm store
+        id: pnpm-store
+        run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pnpm store
+        uses: actions/cache@v6
+        with:
+          path: ${{ steps.pnpm-store.outputs.path }}
+          key: pnpm-store-${{ runner.os }}-${{ hashFiles('**/pnpm-lock.yaml') }}
+          restore-keys: pnpm-store-${{ runner.os }}-
+
+      - name: Check GitHub Packages lockfile config
+        run: |
+          for npmrc in "$GITHUB_WORKSPACE/.npmrc" ".npmrc"; do
+            if [ -f "$npmrc" ] && grep -q 'npm.pkg.github.com' "$npmrc" && ! grep -q 'lockfile-include-tarball-url=true' "$npmrc"; then
+              echo "::error file=$npmrc::.npmrc uses GitHub Packages but is missing lockfile-include-tarball-url=true"
+              echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
+              echo ""
+              echo "Fix: add 'lockfile-include-tarball-url=true' to .npmrc, then regenerate the lockfile:"
+              echo "  pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install"
+              echo ""
+              echo "See: https://github.com/pnpm/pnpm/issues/7579"
+              exit 1
+            fi
+          done
+
+      # wrangler-action falls back to its own bundled wrangler when
+      # node_modules is absent, and that copy can be too old to read
+      # wrangler.jsonc.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Setup Doppler
+        if: inputs.doppler-project != ''
+        uses: dopplerhq/cli-action@v4
+
+      - name: Build
+        if: inputs.build-script != ''
+        run: |
+          if [ -n "$DOPPLER_PROJECT" ]; then
+            doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.build-script }}
+          else
+            ${{ inputs.build-script }}
+          fi
+        env:
+          DOPPLER_PROJECT: ${{ inputs.doppler-project }}
+          DOPPLER_CONFIG: ${{ inputs.doppler-config }}
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN }}
+
+      # Uploads a version without deploying it, so nothing on the live routes
+      # changes. The versioned URL is a *.workers.dev host.
+      - id: upload
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: ${{ inputs.working-directory }}
+          packageManager: pnpm
+          command: ${{ inputs.wrangler-subcommand }}
+
+      - name: Comment preview URL on PR
+        if: >-
+          inputs.comment-on-pr
+          && github.event_name == 'pull_request'
+          && steps.upload.outputs.deployment-url != ''
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL: ${{ steps.upload.outputs.deployment-url }}
+          COMMENT_MARKER: ${{ inputs.comment-marker }}
+        with:
+          script: |
+            const marker = process.env.COMMENT_MARKER;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const body = `${marker}\n**Cloudflare preview:** ${process.env.PREVIEW_URL}\n\n_Updated for ${sha}._`;
+            // Paginate: the marker comment can fall past the first page on a
+            // long PR, and missing it would create a duplicate every push.
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              ...context.repo, issue_number: context.issue.number,
+            });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ ...context.repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ ...context.repo, issue_number: context.issue.number, body });
+            }

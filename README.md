@@ -12,6 +12,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file` |
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
 | [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + migrations | `migration-command`, `doppler-project`, scripts |
+| [`preview-cloudflare.yml`](.github/workflows/preview-cloudflare.yml) | Workers PR preview upload + URL comment | `wrangler-subcommand`, `build-script`, `comment-on-pr` |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
 | [`publish-relay.yml`](.github/workflows/publish-relay.yml) | Publish release artifacts to Relay | `org`, `product`, `version`, `artifact-name`, `artifact-path`, `policy-type` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
@@ -101,6 +102,43 @@ jobs:
     with:
       plan-only: false
     secrets: inherit
+```
+
+### Cloudflare PR Preview
+
+Uploads a Worker version without deploying it, then posts (and updates on each
+push) a comment with the versioned preview URL. Nothing on the live routes
+changes.
+
+```yaml
+# .github/workflows/preview.yml
+name: PR Preview
+on:
+  pull_request:
+
+jobs:
+  preview:
+    uses: unstable-studios/.github/.github/workflows/preview-cloudflare.yml@main
+    secrets: inherit
+```
+
+`CLOUDFLARE_ACCOUNT_ID` is optional here — wrangler reads `account_id` from
+`wrangler.jsonc`/`wrangler.toml` when it isn't set. The preview URL is also
+exposed as a `preview-url` output for downstream jobs (smoke tests, Lighthouse):
+
+```yaml
+jobs:
+  preview:
+    uses: unstable-studios/.github/.github/workflows/preview-cloudflare.yml@main
+    secrets: inherit
+
+  smoke:
+    needs: preview
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -fsS "$URL" > /dev/null
+        env:
+          URL: ${{ needs.preview.outputs.preview-url }}
 ```
 
 ### Terraform Plan on PR
