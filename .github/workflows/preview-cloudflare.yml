@@ -20,9 +20,9 @@ on:
         type: string
         default: ""
       wrangler-command:
-        description: "Wrangler command producing a preview URL"
+        description: "Wrangler subcommand producing a preview URL. Passed to wrangler-action, which supplies the `pnpm exec wrangler` prefix itself — so this is 'versions upload', not the full invocation used by deploy-cloudflare.yml."
         type: string
-        default: "pnpm exec wrangler versions upload"
+        default: "versions upload"
       comment-on-pr:
         description: "Post/update a PR comment with the preview URL"
         type: boolean
