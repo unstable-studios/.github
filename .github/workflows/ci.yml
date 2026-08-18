@@ -110,7 +110,7 @@ jobs:
       # Shared setup: setup-node -> packageManager-aware pnpm version
       # resolution -> pnpm/action-setup -> store cache -> GitHub Packages
       # lockfile guard. See .github/actions/setup-pnpm.
-      - uses: unstable-studios/.github/.github/actions/setup-pnpm@chore/setup-pnpm-composite-action
+      - uses: unstable-studios/.github/.github/actions/setup-pnpm@main
         with:
           node-version: ${{ inputs.node-version }}
           pnpm-version: ${{ inputs.pnpm-version }}
@@ -192,7 +192,7 @@ jobs:
       # Shared setup: setup-node -> packageManager-aware pnpm version
       # resolution -> pnpm/action-setup -> store cache -> GitHub Packages
       # lockfile guard. See .github/actions/setup-pnpm.
-      - uses: unstable-studios/.github/.github/actions/setup-pnpm@chore/setup-pnpm-composite-action
+      - uses: unstable-studios/.github/.github/actions/setup-pnpm@main
         with:
           node-version: ${{ inputs.node-version }}
           pnpm-version: ${{ inputs.pnpm-version }}
