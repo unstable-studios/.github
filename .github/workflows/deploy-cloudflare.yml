@@ -164,6 +164,7 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
 
       - name: Build
+        if: inputs.build-script != ''
         run: |
           if [ -n "$DOPPLER_PROJECT" ]; then
             doppler run -p "$DOPPLER_PROJECT" -c "$DOPPLER_CONFIG" -- ${{ inputs.build-script }}
