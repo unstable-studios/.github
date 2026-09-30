@@ -15,6 +15,10 @@ on:
         description: "Commitlint config file path (empty uses default)"
         type: string
         default: ""
+      registry-url:
+        description: "npm registry URL for authentication (e.g. https://npm.pkg.github.com for GitHub Packages)"
+        type: string
+        default: ""
 
 jobs:
   commitlint:
@@ -31,9 +35,14 @@ jobs:
         with:
           node-version: ${{ inputs.node-version }}
           pnpm-version: ${{ inputs.pnpm-version }}
+          registry-url: ${{ inputs.registry-url || '' }}
 
+      # NODE_AUTH_TOKEN is only used when registry-url is set (setup-node
+      # writes an .npmrc that references it); harmless otherwise.
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Validate commits (PR)
         if: github.event_name == 'pull_request'
