@@ -9,7 +9,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`ci.yml`](.github/workflows/ci.yml) | Lint, typecheck, build, test | `node-version`, `enable-matrix`, `doppler-project`, scripts |
 | [`release-please.yml`](.github/workflows/release-please.yml) | Automated versioning and changelogs | `config-file`, `manifest-file` |
 | [`release-pr-check.yml`](.github/workflows/release-pr-check.yml) | Lightweight gate for release PRs (skip full CI) | `manifest-file` |
-| [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file` |
+| [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file`, `registry-url` |
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
 | [`deploy-cloudflare.yml`](.github/workflows/deploy-cloudflare.yml) | Workers deploy + migrations | `migration-command`, `doppler-project`, scripts |
 | [`preview-cloudflare.yml`](.github/workflows/preview-cloudflare.yml) | Workers PR preview upload + URL comment | `wrangler-subcommand`, `build-script`, `comment-on-pr` |
