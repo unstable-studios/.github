@@ -118,7 +118,7 @@ jobs:
       # Uploads a version without deploying it, so nothing on the live routes
       # changes. The versioned URL is a *.workers.dev host.
       - id: upload
-        uses: cloudflare/wrangler-action@v3
+        uses: cloudflare/wrangler-action@v4
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
