@@ -16,6 +16,7 @@ README.md              # Usage docs and examples
 
 - All workflows use `on: workflow_call` — they are never triggered directly
 - Every workflow respects `vars.RUNS_ON` with a default of `ubuntu-latest`
+- GitHub's cache (`actions/cache`, `setup-*` `cache:`) only on GitHub-hosted runners: `if: runner.environment == 'github-hosted'`. Uploading from the self-hosted echo-turbine runners takes minutes
 - pnpm is the standard package manager across the org
 - Concurrency: CI jobs cancel in-progress; deploy/release jobs do not
 - All user-controlled inputs (PR titles, branch names) are passed via `env:` variables, never interpolated directly in `run:` blocks

@@ -61,7 +61,10 @@ jobs:
         if: inputs.doppler-project != ''
         uses: dopplerhq/cli-action@v4
 
+      # GitHub-hosted runners only: uploading to GitHub's cache from
+      # self-hosted runners (echo-turbine) is slower than downloading providers.
       - name: Cache Terraform plugins
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v6
         with:
           path: |
