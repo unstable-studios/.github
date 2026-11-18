@@ -60,7 +60,11 @@ runs:
       shell: bash
       run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
+    # GitHub-hosted runners only. Self-hosted runners (echo-turbine) keep the
+    # store on the host (npm_config_store_dir), and uploading to GitHub's
+    # cache from there took minutes per job.
     - name: Cache pnpm store
+      if: runner.environment == 'github-hosted'
       uses: actions/cache@v6
       with:
         path: ${{ steps.pnpm-store.outputs.path }}

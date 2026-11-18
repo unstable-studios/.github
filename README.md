@@ -221,6 +221,7 @@ jobs:
 
 - **Package manager**: pnpm everywhere
 - **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. Set the repo/org variable for self-hosted runners.
+- **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; the runner keeps the pnpm store on the host instead. Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
 - **Concurrency**: CI cancels in-progress; deploys and releases do not.
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.
 - **Secrets**: Use `secrets: inherit` to pass all secrets from the caller. Doppler integration is opt-in via `doppler-project` input.
