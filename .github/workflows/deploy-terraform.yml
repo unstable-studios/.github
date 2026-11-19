@@ -47,6 +47,9 @@ jobs:
       pull-requests: write
     defaults:
       run:
+        # Explicit bash runs with -o pipefail, so `terraform plan | tee` fails
+        # the step when the plan fails (the default shell doesn't).
+        shell: bash
         working-directory: ${{ inputs.working-directory }}
     steps:
       - uses: actions/checkout@v7
