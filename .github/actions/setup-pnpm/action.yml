@@ -61,7 +61,8 @@ runs:
       run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
     # GitHub-hosted runners only. Self-hosted runners (echo-turbine) keep the
-    # store on the host (npm_config_store_dir), and uploading to GitHub's
+    # store on the host (npm_config_store_dir for pnpm 10, pnpm_config_store_dir
+    # for pnpm 11+), and uploading to GitHub's
     # cache from there took minutes per job.
     - name: Cache pnpm store
       if: runner.environment == 'github-hosted'
@@ -74,17 +75,23 @@ runs:
     - name: Check GitHub Packages lockfile config
       shell: bash
       run: |
-        for npmrc in "$GITHUB_WORKSPACE/.npmrc" "$GITHUB_WORKSPACE/$WORKING_DIRECTORY/.npmrc"; do
-          if [ -f "$npmrc" ] && grep -q 'npm.pkg.github.com' "$npmrc" && ! grep -q 'lockfile-include-tarball-url=true' "$npmrc"; then
-            echo "::error file=$npmrc::.npmrc uses GitHub Packages but is missing lockfile-include-tarball-url=true"
-            echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
-            echo ""
-            echo "Fix: add 'lockfile-include-tarball-url=true' to .npmrc, then regenerate the lockfile:"
-            echo "  pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install"
-            echo ""
-            echo "See: https://github.com/pnpm/pnpm/issues/7579"
-            exit 1
-          fi
+        # pnpm 10 reads lockfile-include-tarball-url from .npmrc; pnpm 11+
+        # reads only auth and registry settings there, and takes
+        # lockfileIncludeTarballUrl from pnpm-workspace.yaml instead
+        for dir in "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/$WORKING_DIRECTORY"; do
+          npmrc="$dir/.npmrc"
+          [ -f "$npmrc" ] && grep -q 'npm.pkg.github.com' "$npmrc" || continue
+          grep -q 'lockfile-include-tarball-url=true' "$npmrc" && continue
+          grep -Eq '^lockfileIncludeTarballUrl:[[:space:]]*true' "$dir/pnpm-workspace.yaml" "$GITHUB_WORKSPACE/pnpm-workspace.yaml" 2>/dev/null && continue
+          echo "::error file=$npmrc::.npmrc uses GitHub Packages but the lockfile doesn't record tarball URLs"
+          echo "pnpm constructs incorrect tarball URLs for GitHub Packages without this setting."
+          echo ""
+          echo "Fix, then regenerate the lockfile (pnpm store prune && rm pnpm-lock.yaml && rm -rf node_modules && pnpm install):"
+          echo "  pnpm 11 or later: 'lockfileIncludeTarballUrl: true' in pnpm-workspace.yaml"
+          echo "  pnpm 10: 'lockfile-include-tarball-url=true' in .npmrc"
+          echo ""
+          echo "See: https://github.com/pnpm/pnpm/issues/7579"
+          exit 1
         done
       env:
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
