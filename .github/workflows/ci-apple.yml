@@ -1,0 +1,89 @@
+name: CI (Apple)
+
+# Runs an Apple app repo's test script on a Mac with Xcode, once per entry of
+# a matrix. A pull request tests `pull-request-matrix` (the newest iOS); a
+# push tests `matrix` (every supported iOS).
+#
+# The Mac is the org's macOS runner pool when the variable RUNS_ON_MACOS
+# names it (private repos), and GitHub's runner from the matrix entry
+# otherwise. Each Xcode is at /Applications/Xcode_<version>.app on both.
+
+on:
+  workflow_call:
+    inputs:
+      script:
+        description: "Test command, run from the repo root. It gets the iOS major version as its argument."
+        type: string
+        default: "scripts/test"
+      matrix:
+        description: >-
+          What a push tests, as a JSON list. Each entry has name, xcode (the
+          version in /Applications/Xcode_<version>.app), ios (the major
+          version passed to the script) and hosted (the GitHub runner label
+          with that Xcode, used when RUNS_ON_MACOS isn't set).
+        type: string
+        default: >-
+          [{"name": "Xcode 27, iOS 27", "xcode": "27.2", "ios": "27", "hosted": "xcode-27"},
+           {"name": "Xcode 27, iOS 26", "xcode": "27.2", "ios": "26", "hosted": "xcode-27"}]
+      pull-request-matrix:
+        description: "What a pull request tests, in the same form as matrix."
+        type: string
+        default: >-
+          [{"name": "Xcode 27, iOS 27", "xcode": "27.2", "ios": "27", "hosted": "xcode-27"}]
+      skip-on-docs-only:
+        description: "Skip the tests when a pull request only touches docs and other non-code files"
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: "Job timeout"
+        type: number
+        default: 30
+
+concurrency:
+  group: ci-apple-${{ github.head_ref || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ vars.RUNS_ON_MACOS || matrix.hosted }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && inputs.pull-request-matrix || inputs.matrix) }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ matrix.xcode }}.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      # One job, not a separate "changes" job: a docs-only pull request ends
+      # here with success, so a required check still reports.
+      - uses: dorny/paths-filter@v4
+        id: changes
+        if: github.event_name == 'pull_request' && inputs.skip-on-docs-only
+        with:
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!**/docs/**'
+              - '!**/LICENSE*'
+              - '!**/.editorconfig'
+              - '!**/.vscode/**'
+              - '!**/CLAUDE.md'
+              - '!**/.gitignore'
+
+      - name: Show Xcode version
+        if: steps.changes.outputs.code != 'false'
+        run: xcodebuild -version
+
+      - name: Test
+        if: steps.changes.outputs.code != 'false'
+        env:
+          SCRIPT: ${{ inputs.script }}
+          IOS: ${{ matrix.ios }}
+        run: $SCRIPT "$IOS"
