@@ -214,12 +214,15 @@ jobs:
       ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
 ```
 
+Pass `ref` too when the caller has the release's commit (release-please's `sha` output), so the build is the tagged commit even if `main` has moved on.
+
 The job runs in the calling repo's `testflight` environment and reads the App Store Connect key from it: `ASC_KEY_ID` and `ASC_ISSUER_ID` as variables, `ASC_KEY_P8` as a secret. Keep the key in Doppler, in a config of its own, with a GitHub sync to that environment and "Sync unmasked secrets as variables" on. The secret has to be passed by name even though it only exists in the environment ([reusing workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)).
 
 - Signing is cloud signing: no certificate or profile on the runner. The key is a team key with the Admin role.
 - Limit the environment to the branch the caller runs on (`main` when chained off release-please). Whoever can run a workflow there can use the key.
-- With no `version`, it reads `.release-please-manifest.json`, so a `workflow_dispatch` caller uploads the current version again.
-- The build number is the caller's run number times 100 plus the attempt, so a re-run never reuses one. Renaming the calling workflow file restarts the run number, which App Store Connect refuses for a version already uploaded.
+- With no `version`, it reads the root package's version from `.release-please-manifest.json`. A `workflow_dispatch` caller then uploads whatever is on the branch it ran for, under the last released version, as a new build.
+- The build number is the time in UTC to the minute (`202611251630`), so it rises across re-runs, renamed workflows and several callers alike.
+- The key's ID and issuer ID show in the job's log, because `xcodebuild` prints its command line. They are no use without the key file. In a public repo they would be public.
 - The repo provides an export options plist (default `Config/TestFlight-ExportOptions.plist`) with `method` `app-store-connect` and `destination` `upload`, and its Info.plist answers the export compliance question (`ITSAppUsesNonExemptEncryption`).
 - The runner is `xcode-27` with Xcode 27.2 unless `runs-on` and `xcode-path` say otherwise. `vars.RUNS_ON` doesn't apply: it names a Linux runner.
 

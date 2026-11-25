@@ -26,8 +26,12 @@ on:
         description: "Scheme to archive"
         type: string
         required: true
+      ref:
+        description: "Commit, tag or branch to build. Empty builds the commit the caller ran for. Pass release-please's sha so the build is the tagged commit."
+        type: string
+        default: ""
       version:
-        description: "Version people see, such as 1.2.3. Empty reads it from the release-please manifest."
+        description: "Version people see, such as 1.2.3. Empty reads the root package's version from the release-please manifest."
         type: string
         default: ""
       manifest-file:
@@ -35,7 +39,7 @@ on:
         type: string
         default: ".release-please-manifest.json"
       build-number:
-        description: "Build number, higher than any uploaded for this version. Empty makes one from the run number and attempt."
+        description: "Build number, higher than any uploaded for this version. Empty uses the time in UTC, as YYYYMMDDHHMM."
         type: string
         default: ""
       export-options:
@@ -90,6 +94,8 @@ jobs:
       DEVELOPER_DIR: ${{ inputs.xcode-path }}/Contents/Developer
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Show Xcode version
         run: xcodebuild -version
@@ -102,12 +108,17 @@ jobs:
           MANIFEST_FILE: ${{ inputs.manifest-file }}
         run: |
           if [ -z "$VERSION" ]; then
-            VERSION=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["."])' "$MANIFEST_FILE")
+            if [ ! -f "$MANIFEST_FILE" ]; then
+              echo "::error::No version was given and there is no manifest at $MANIFEST_FILE."
+              exit 2
+            fi
+            VERSION=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(".", ""))' "$MANIFEST_FILE")
           fi
-          # Rises with each run of the calling workflow and with each new
-          # attempt of a run, so no two uploads share one.
+          # The time, to the minute. It only ever rises, whichever workflow
+          # calls this and however often it is re-run or renamed, so no two
+          # uploads of a version share a build number.
           if [ -z "$BUILD" ]; then
-            BUILD=$((GITHUB_RUN_NUMBER * 100 + GITHUB_RUN_ATTEMPT))
+            BUILD=$(date -u +%Y%m%d%H%M)
           fi
           number='(0|[1-9][0-9]*)'
           if ! [[ $VERSION =~ ^$number\.$number\.$number$ ]]; then
