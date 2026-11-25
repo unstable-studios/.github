@@ -177,7 +177,9 @@ jobs:
     TAG: ${{ github.event.release.tag_name }}
 ```
 
-The new release has the mark for the second or two before it is moved back, since Release Please has no setting for it. The first release of a repository keeps it, there being no earlier release to give it to.
+The new release has the mark for a few seconds before it is moved back, since Release Please has no setting for it. The first release of a repository keeps it, there being no earlier release to give it to.
+
+Marking `$TAG` assumes one build at a time. If builds can overlap or be re-run for an old tag, mark the newest release that has its files instead, so the mark never moves backwards.
 
 ### Publish Artifact to Relay
 

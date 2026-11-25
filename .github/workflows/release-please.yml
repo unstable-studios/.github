@@ -72,6 +72,8 @@ jobs:
           REPO: ${{ github.repository }}
         shell: bash
         run: |
+          # Anything published after this moment is a release this run made.
+          echo "since=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
           if answer=$(gh api "repos/$REPO/releases/latest" --jq .tag_name 2>&1); then
             echo "tag=$answer" >> "$GITHUB_OUTPUT"
             echo "Latest is $answer."
@@ -91,7 +93,10 @@ jobs:
           token: ${{ secrets.GH_PAT_RELEASEPLEASE }}
 
       - name: Keep the Latest mark where it was
-        if: ${{ !inputs.mark-latest && steps.release.outputs.releases_created == 'true' && steps.latest.outputs.tag != '' }}
+        # Also when the action failed after it made the release: it opens the next release
+        # pull request afterwards, and a failure there must not leave the mark on a release
+        # with nothing in it.
+        if: ${{ !cancelled() && !inputs.mark-latest && steps.release.outputs.releases_created == 'true' && steps.latest.outputs.tag != '' }}
         # The release exists by now. Failing here would hide that from callers that read the
         # outputs, so a failure only shows as a warning on the run.
         continue-on-error: true
@@ -99,6 +104,17 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT_RELEASEPLEASE }}
           REPO: ${{ github.repository }}
           PREVIOUS: ${{ steps.latest.outputs.tag }}
+          SINCE: ${{ steps.latest.outputs.since }}
+        shell: bash
         run: |
-          echo "Keeping $PREVIOUS as Latest. The caller marks the new release when it is complete."
-          gh release edit "$PREVIOUS" --repo "$REPO" --latest
+          # Only take the mark back from a release this run made. If something else moved it
+          # meanwhile, such as an earlier release whose files were just attached, it stays.
+          read -r current published < <(gh api "repos/$REPO/releases/latest" --jq '"\(.tag_name) \(.published_at)"')
+          if [ "$current" = "$PREVIOUS" ]; then
+            echo "$PREVIOUS is still Latest."
+          elif [[ "$published" < "$SINCE" ]]; then
+            echo "Latest moved to $current, published before this run. Leaving it."
+          else
+            echo "Keeping $PREVIOUS as Latest in place of $current. The caller marks the new release when it is complete."
+            gh release edit "$PREVIOUS" --repo "$REPO" --latest
+          fi
