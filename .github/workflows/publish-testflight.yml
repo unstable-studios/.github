@@ -1,0 +1,194 @@
+name: Publish TestFlight
+
+# Archive an iOS app, sign it for distribution and upload it to App Store
+# Connect, where it shows under TestFlight.
+#
+# Signing is automatic with certificates Apple keeps (cloud signing), so the
+# runner holds no certificate or profile. xcodebuild signs in with an App
+# Store Connect team API key whose role is Admin. The key comes from the
+# calling repo's GitHub environment, where Doppler syncs it:
+#
+#   vars.ASC_KEY_ID          The key's ID
+#   vars.ASC_ISSUER_ID       The issuer ID of the team's keys
+#   secrets.ASC_KEY_P8       The contents of the key's .p8 file
+#
+# The caller must pass the secret by name (ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}),
+# even though it only exists in the environment.
+
+on:
+  workflow_call:
+    inputs:
+      project:
+        description: "Path to the .xcodeproj"
+        type: string
+        required: true
+      scheme:
+        description: "Scheme to archive"
+        type: string
+        required: true
+      ref:
+        description: "Commit, tag or branch to build. Empty builds the commit the caller ran for. Pass release-please's sha so the build is the tagged commit."
+        type: string
+        default: ""
+      version:
+        description: "Version people see, such as 1.2.3. Empty reads the root package's version from the release-please manifest."
+        type: string
+        default: ""
+      manifest-file:
+        description: "Path to .release-please-manifest.json, read when version is empty"
+        type: string
+        default: ".release-please-manifest.json"
+      build-number:
+        description: "Build number, higher than any uploaded for this version. Empty uses the time in UTC, as YYYYMMDDHHMM."
+        type: string
+        default: ""
+      export-options:
+        description: "Path to the export options plist (method app-store-connect, destination upload)"
+        type: string
+        default: "Config/TestFlight-ExportOptions.plist"
+      environment:
+        description: "GitHub environment that holds the App Store Connect key"
+        type: string
+        default: "testflight"
+      runs-on:
+        description: "Runner label. It must have the Xcode at xcode-path."
+        type: string
+        default: "xcode-27"
+      xcode-path:
+        description: "Path to the Xcode app to build with"
+        type: string
+        default: "/Applications/Xcode_27.2.app"
+      timeout-minutes:
+        description: "Job timeout"
+        type: number
+        default: 45
+    secrets:
+      ASC_KEY_P8:
+        description: "Contents of the App Store Connect API key's .p8 file"
+        required: true
+    outputs:
+      version:
+        description: "The version that was uploaded"
+        value: ${{ jobs.upload.outputs.version }}
+      build-number:
+        description: "The build number that was uploaded"
+        value: ${{ jobs.upload.outputs.build-number }}
+
+concurrency:
+  group: publish-testflight-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    name: Upload to TestFlight
+    runs-on: ${{ inputs.runs-on }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # Holds the key. Its rules decide which branches and tags may use it.
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      build-number: ${{ steps.plan.outputs.build }}
+    env:
+      DEVELOPER_DIR: ${{ inputs.xcode-path }}/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - name: Show Xcode version
+        run: xcodebuild -version
+
+      - name: Work out the version and build number
+        id: plan
+        env:
+          VERSION: ${{ inputs.version }}
+          BUILD: ${{ inputs.build-number }}
+          MANIFEST_FILE: ${{ inputs.manifest-file }}
+        run: |
+          if [ -z "$VERSION" ]; then
+            if [ ! -f "$MANIFEST_FILE" ]; then
+              echo "::error::No version was given and there is no manifest at $MANIFEST_FILE."
+              exit 2
+            fi
+            VERSION=$(/usr/bin/python3 -c 'import json, sys; print(json.load(open(sys.argv[1])).get(".", ""))' "$MANIFEST_FILE")
+          fi
+          # The time, to the minute. It only ever rises, whichever workflow
+          # calls this and however often it is re-run or renamed, so no two
+          # uploads of a version share a build number.
+          if [ -z "$BUILD" ]; then
+            BUILD=$(date -u +%Y%m%d%H%M)
+          fi
+          number='(0|[1-9][0-9]*)'
+          if ! [[ $VERSION =~ ^$number\.$number\.$number$ ]]; then
+            echo "::error::The version must look like 1.2.3, not '$VERSION'."
+            exit 2
+          fi
+          if ! [[ $BUILD =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::The build number must be a whole number above zero, not '$BUILD'."
+            exit 2
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+
+      - name: Write the App Store Connect key
+        env:
+          ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+        run: |
+          # Empty when it is missing from the environment, was synced as a
+          # variable, or the caller didn't pass it.
+          : "${ASC_KEY_P8:?ASC_KEY_P8 is not a secret in this environment, or the caller did not pass it.}"
+          umask 077
+          printf '%s\n' "$ASC_KEY_P8" > "$RUNNER_TEMP/asc-key.p8"
+          if ! grep -q "PRIVATE KEY" "$RUNNER_TEMP/asc-key.p8"; then
+            echo "::error::ASC_KEY_P8 isn't an API key (.p8)."
+            exit 2
+          fi
+
+      - name: Archive, sign and upload
+        env:
+          # Identifiers, not secrets: Doppler syncs unmasked values to
+          # GitHub as variables. They show in this job's log.
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+          EXPORT_OPTIONS: ${{ inputs.export-options }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          BUILD: ${{ steps.plan.outputs.build }}
+        run: |
+          : "${ASC_KEY_ID:?ASC_KEY_ID is not a variable in this environment.}"
+          : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is not a variable in this environment.}"
+          sign_in=(
+            -allowProvisioningUpdates
+            -authenticationKeyPath "$RUNNER_TEMP/asc-key.p8"
+            -authenticationKeyID "$ASC_KEY_ID"
+            -authenticationKeyIssuerID "$ASC_ISSUER_ID"
+          )
+          archive="$RUNNER_TEMP/app.xcarchive"
+
+          # The app and its extensions must carry the same version and
+          # build, so both are set for every target here.
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$archive" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD" \
+            "${sign_in[@]}"
+
+          # "upload" in the options sends it to App Store Connect.
+          xcodebuild -exportArchive \
+            -archivePath "$archive" \
+            -exportOptionsPlist "$EXPORT_OPTIONS" \
+            -exportPath "$RUNNER_TEMP/export" \
+            "${sign_in[@]}"
+
+          echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove the key and the archive
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export"
