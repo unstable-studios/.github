@@ -15,6 +15,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`preview-cloudflare.yml`](.github/workflows/preview-cloudflare.yml) | Workers PR preview upload + URL comment | `wrangler-subcommand`, `build-script`, `comment-on-pr` |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
 | [`publish-relay.yml`](.github/workflows/publish-relay.yml) | Publish release artifacts to Relay | `org`, `product`, `version`, `artifact-name`, `artifact-path`, `policy-type` |
+| [`publish-testflight.yml`](.github/workflows/publish-testflight.yml) | Archive an iOS app, sign it and upload it to TestFlight | `project`, `scheme`, `version`, `environment` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
 
 ## Usage
@@ -191,6 +192,39 @@ jobs:
 
 Outputs `download-url`, `artifact-id`, and `link-id` for downstream jobs. Set `RELAY_API_SECRET` as a repo or org secret.
 
+### Publish an iOS App to TestFlight
+
+Chained off release-please, so merging the release PR uploads that version:
+
+```yaml
+jobs:
+  release:
+    uses: unstable-studios/.github/.github/workflows/release-please.yml@main
+    secrets: inherit
+
+  testflight:
+    needs: release
+    if: needs.release.outputs.release_created == 'true'
+    uses: unstable-studios/.github/.github/workflows/publish-testflight.yml@main
+    with:
+      project: MyApp.xcodeproj
+      scheme: MyApp
+      version: ${{ needs.release.outputs.version }}
+    secrets:
+      ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
+```
+
+The job runs in the calling repo's `testflight` environment and reads the App Store Connect key from it: `ASC_KEY_ID` and `ASC_ISSUER_ID` as variables, `ASC_KEY_P8` as a secret. Keep the key in Doppler, in a config of its own, with a GitHub sync to that environment and "Sync unmasked secrets as variables" on. The secret has to be passed by name even though it only exists in the environment ([reusing workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)).
+
+- Signing is cloud signing: no certificate or profile on the runner. The key is a team key with the Admin role.
+- Limit the environment to the branch the caller runs on (`main` when chained off release-please). Whoever can run a workflow there can use the key.
+- With no `version`, it reads `.release-please-manifest.json`, so a `workflow_dispatch` caller uploads the current version again.
+- The build number is the caller's run number times 100 plus the attempt, so a re-run never reuses one. Renaming the calling workflow file restarts the run number, which App Store Connect refuses for a version already uploaded.
+- The repo provides an export options plist (default `Config/TestFlight-ExportOptions.plist`) with `method` `app-store-connect` and `destination` `upload`, and its Info.plist answers the export compliance question (`ITSAppUsesNonExemptEncryption`).
+- The runner is `xcode-27` with Xcode 27.2 unless `runs-on` and `xcode-path` say otherwise. `vars.RUNS_ON` doesn't apply: it names a Linux runner.
+
+First used by `rabbithole-apple`.
+
 ### Custom Overrides (e.g. Electron)
 
 For repos needing custom steps (like Electron cross-platform builds), use the shared workflows for the common parts and add repo-specific jobs:
@@ -220,7 +254,7 @@ jobs:
 ## Conventions
 
 - **Package manager**: pnpm everywhere
-- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. Set the repo/org variable for self-hosted runners.
+- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. Set the repo/org variable for self-hosted runners. `publish-testflight.yml` needs a Mac and takes a `runs-on` input instead.
 - **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; the runner keeps the pnpm store on the host instead. Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
 - **Concurrency**: CI cancels in-progress; deploys and releases do not.
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.
