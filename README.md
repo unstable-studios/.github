@@ -7,7 +7,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | Workflow | Purpose | Key Inputs |
 |----------|---------|------------|
 | [`ci.yml`](.github/workflows/ci.yml) | Lint, typecheck, build, test | `node-version`, `enable-matrix`, `doppler-project`, scripts |
-| [`release-please.yml`](.github/workflows/release-please.yml) | Automated versioning and changelogs | `config-file`, `manifest-file` |
+| [`release-please.yml`](.github/workflows/release-please.yml) | Automated versioning and changelogs | `config-file`, `manifest-file`, `mark-latest` |
 | [`release-pr-check.yml`](.github/workflows/release-pr-check.yml) | Lightweight gate for release PRs (skip full CI) | `manifest-file` |
 | [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file`, `registry-url` |
 | [`publish-npm.yml`](.github/workflows/publish-npm.yml) | Publish to GitHub Packages | `package-filter`, `registry-url` |
@@ -153,6 +153,33 @@ jobs:
       post-plan-comment: true
     secrets: inherit
 ```
+
+### Release whose files are attached later
+
+GitHub marks a release Latest the moment it is created. If installers are built and attached afterwards, anything that reads the Latest release (an in-app updater, a download link) finds a release with nothing in it for a few minutes.
+
+Set `mark-latest: false` to leave the mark on the release that had it. The job that attaches the files then marks the new release:
+
+```yaml
+jobs:
+  release:
+    uses: unstable-studios/.github/.github/workflows/release-please.yml@main
+    with:
+      mark-latest: false
+    secrets: inherit
+```
+
+```yaml
+# In the workflow that builds the files, after they are attached:
+- run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --latest
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    TAG: ${{ github.event.release.tag_name }}
+```
+
+The new release has the mark for a few seconds before it is moved back, since Release Please has no setting for it. The first release of a repository keeps it, there being no earlier release to give it to.
+
+Marking `$TAG` assumes one build at a time. If builds can overlap or be re-run for an old tag, mark the newest release that has its files instead, so the mark never moves backwards.
 
 ### Publish Artifact to Relay
 
