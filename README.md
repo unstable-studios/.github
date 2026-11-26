@@ -241,8 +241,8 @@ jobs:
 
 The repo provides `scripts/test`, which takes an iOS major version (`scripts/test 27`), picks a simulator of that version and runs the tests and builds. The workflow sets `DEVELOPER_DIR` to the matrix entry's Xcode.
 
-- Every run tests each entry of `matrix`: by default iOS 27 and iOS 26, both with Xcode 27.2 on the org's pool. Pass your own JSON list to change that, or `pull-request-matrix` to test less on pull requests.
-- The Mac is the org's macOS runner pool when the org variable `RUNS_ON_MACOS` is set, which private repos see. What the pool has installed is listed in `unstable-studios/echo-core` under `runners/macos`: a matrix entry must name an Xcode and an iOS that are there. Without the variable, each entry's `hosted` label picks one of GitHub's macOS runners and `hosted-xcode` the Xcode there. GitHub's `xcode-27` image has no iOS 26 simulator, so the default iOS 26 entry falls back to `macos-26` with Xcode 26.6.
+- Every run tests each entry of `matrix`: by default Xcode 27.2 on iOS 27 and Xcode 26.6 on iOS 26. Pass your own JSON list to change that, or `pull-request-matrix` to test less on pull requests.
+- The Mac is the org's macOS runner pool when the org variable `RUNS_ON_MACOS` is set, which private repos see. What the pool has installed is listed in `unstable-studios/echo-core` under `runners/macos`: a matrix entry must name an Xcode and an iOS that are there. Without the variable, each entry's `hosted` label picks one of GitHub's macOS runners: `xcode-27` for Xcode 27.2 and `macos-26` for Xcode 26.6 (GitHub's `xcode-27` image has no iOS 26 simulator). An entry can name a different Xcode for GitHub's runner with `hosted-xcode`.
 - The caller must grant `contents: read` and `pull-requests: read` (the docs-only check lists the pull request's files); without them the run fails at startup.
 - A pull request that only touches docs skips the tests and still reports success. A newer push to a pull request cancels the run before it.
 - It's one job per matrix entry: on GitHub's runners every job is billed a whole minute at the macOS rate.

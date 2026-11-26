@@ -1,7 +1,7 @@
 name: CI (Apple)
 
 # Runs an Apple app repo's test script on a Mac with Xcode, once per entry of
-# a matrix: every supported iOS, on pull requests and on pushes.
+# a matrix: every supported Xcode and iOS, on pull requests and on pushes.
 #
 # The Mac is the org's macOS runner pool when the variable RUNS_ON_MACOS
 # names it (private repos), and GitHub's runner from the matrix entry
@@ -24,8 +24,8 @@ on:
           runner doesn't have the pool's).
         type: string
         default: >-
-          [{"name": "iOS 27", "ios": "27", "xcode": "27.2", "hosted": "xcode-27"},
-           {"name": "iOS 26", "ios": "26", "xcode": "27.2", "hosted": "macos-26", "hosted-xcode": "26.6"}]
+          [{"name": "Xcode 27, iOS 27", "ios": "27", "xcode": "27.2", "hosted": "xcode-27"},
+           {"name": "Xcode 26, iOS 26", "ios": "26", "xcode": "26.6", "hosted": "macos-26"}]
       pull-request-matrix:
         description: "What a pull request tests, in the same form as matrix. Empty tests the same as a push."
         type: string
