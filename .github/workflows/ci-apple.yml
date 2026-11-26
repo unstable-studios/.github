@@ -1,0 +1,94 @@
+name: CI (Apple)
+
+# Runs an Apple app repo's test script on a Mac with Xcode, once per entry of
+# a matrix: every supported iOS, on pull requests and on pushes.
+#
+# The Mac is the org's macOS runner pool when the variable RUNS_ON_MACOS
+# names it (private repos), and GitHub's runner from the matrix entry
+# otherwise. Each Xcode is at /Applications/Xcode_<version>.app on both.
+
+on:
+  workflow_call:
+    inputs:
+      script:
+        description: "Test command, run from the repo root. It gets the iOS major version as its argument."
+        type: string
+        default: "scripts/test"
+      matrix:
+        description: >-
+          What to test, as a JSON list. Each entry has name, ios (the major
+          version passed to the script), xcode (the version in
+          /Applications/Xcode_<version>.app on the org's pool), hosted (the
+          GitHub runner label used when RUNS_ON_MACOS isn't set) and,
+          optionally, hosted-xcode (the Xcode to use there, when GitHub's
+          runner doesn't have the pool's).
+        type: string
+        default: >-
+          [{"name": "iOS 27", "ios": "27", "xcode": "27.2", "hosted": "xcode-27"},
+           {"name": "iOS 26", "ios": "26", "xcode": "27.2", "hosted": "macos-26", "hosted-xcode": "26.6"}]
+      pull-request-matrix:
+        description: "What a pull request tests, in the same form as matrix. Empty tests the same as a push."
+        type: string
+        default: ""
+      skip-on-docs-only:
+        description: "Skip the tests when a pull request only touches docs and other non-code files"
+        type: boolean
+        default: true
+      timeout-minutes:
+        description: "Job timeout"
+        type: number
+        default: 30
+
+# Per workflow and per pull request, so two callers in a repo, or two pull
+# requests from branches with the same name, don't cancel each other.
+concurrency:
+  group: ci-apple-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  test:
+    name: Test (${{ matrix.name }})
+    runs-on: ${{ vars.RUNS_ON_MACOS || matrix.hosted }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    permissions:
+      contents: read
+      pull-requests: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(github.event_name == 'pull_request' && inputs.pull-request-matrix || inputs.matrix) }}
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ vars.RUNS_ON_MACOS && matrix.xcode || matrix.hosted-xcode || matrix.xcode }}.app/Contents/Developer
+    steps:
+      - uses: actions/checkout@v7
+
+      # One job, not a separate "changes" job: a docs-only pull request ends
+      # here with success, so a required check still reports.
+      - uses: dorny/paths-filter@v4
+        id: changes
+        if: github.event_name == 'pull_request' && inputs.skip-on-docs-only
+        with:
+          # A file counts as code only if it matches every rule. With the
+          # default ("some"), '**' alone matches everything.
+          predicate-quantifier: every
+          filters: |
+            code:
+              - '**'
+              - '!**/*.md'
+              - '!**/docs/**'
+              - '!**/LICENSE*'
+              - '!**/.editorconfig'
+              - '!**/.vscode/**'
+              - '!**/CLAUDE.md'
+              - '!**/.gitignore'
+
+      - name: Show Xcode version
+        if: steps.changes.outputs.code != 'false'
+        run: xcodebuild -version
+
+      - name: Test
+        if: steps.changes.outputs.code != 'false'
+        env:
+          SCRIPT: ${{ inputs.script }}
+          IOS: ${{ matrix.ios }}
+        run: $SCRIPT "$IOS"

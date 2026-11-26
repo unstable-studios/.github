@@ -7,6 +7,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | Workflow | Purpose | Key Inputs |
 |----------|---------|------------|
 | [`ci.yml`](.github/workflows/ci.yml) | Lint, typecheck, build, test | `node-version`, `enable-matrix`, `doppler-project`, scripts |
+| [`ci-apple.yml`](.github/workflows/ci-apple.yml) | Run an Apple app's test script on a Mac with Xcode | `script`, `matrix`, `pull-request-matrix` |
 | [`release-please.yml`](.github/workflows/release-please.yml) | Automated versioning and changelogs | `config-file`, `manifest-file`, `mark-latest` |
 | [`release-pr-check.yml`](.github/workflows/release-pr-check.yml) | Lightweight gate for release PRs (skip full CI) | `manifest-file` |
 | [`commitlint.yml`](.github/workflows/commitlint.yml) | Conventional commit enforcement | `config-file`, `registry-url` |
@@ -219,6 +220,34 @@ jobs:
 
 Outputs `download-url`, `artifact-id`, and `link-id` for downstream jobs. Set `RELAY_API_SECRET` as a repo or org secret.
 
+### CI for an Apple App
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  test:
+    uses: unstable-studios/.github/.github/workflows/ci-apple.yml@main
+```
+
+The repo provides `scripts/test`, which takes an iOS major version (`scripts/test 27`), picks a simulator of that version and runs the tests and builds. The workflow sets `DEVELOPER_DIR` to the matrix entry's Xcode.
+
+- Every run tests each entry of `matrix`: by default iOS 27 and iOS 26, both with Xcode 27.2 on the org's pool. Pass your own JSON list to change that, or `pull-request-matrix` to test less on pull requests.
+- The Mac is the org's macOS runner pool when the org variable `RUNS_ON_MACOS` is set, which private repos see. What the pool has installed is listed in `unstable-studios/echo-core` under `runners/macos`: a matrix entry must name an Xcode and an iOS that are there. Without the variable, each entry's `hosted` label picks one of GitHub's macOS runners and `hosted-xcode` the Xcode there. GitHub's `xcode-27` image has no iOS 26 simulator, so the default iOS 26 entry falls back to `macos-26` with Xcode 26.6.
+- The caller must grant `contents: read` and `pull-requests: read` (the docs-only check lists the pull request's files); without them the run fails at startup.
+- A pull request that only touches docs skips the tests and still reports success. A newer push to a pull request cancels the run before it.
+- It's one job per matrix entry: on GitHub's runners every job is billed a whole minute at the macOS rate.
+- The pool's runners aren't fresh machines. A job there shares a home folder, build caches and simulators with earlier jobs, and a pull request's own scripts run as the runner's account. That's why only private repos see the variable, and why `publish-testflight.yml` keeps its signing key on GitHub's runners.
+
 ### Publish an iOS App to TestFlight
 
 Chained off release-please, so merging the release PR uploads that version:
@@ -284,7 +313,7 @@ jobs:
 ## Conventions
 
 - **Package manager**: pnpm everywhere
-- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. Set the repo/org variable for self-hosted runners. `publish-testflight.yml` needs a Mac and takes a `runs-on` input instead.
+- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. It's set at the org level for private repos (`unstable-studios/echo-core`, decision 0007). `ci-apple.yml` needs a Mac and uses `vars.RUNS_ON_MACOS` the same way. `publish-testflight.yml` needs a Mac and takes a `runs-on` input instead.
 - **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; the runner keeps the pnpm store on the host instead. Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
 - **Concurrency**: CI cancels in-progress; deploys and releases do not.
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.
