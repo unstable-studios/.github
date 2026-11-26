@@ -31,8 +31,12 @@ jobs:
       - name: Validate PR title
         env:
           PR_TITLE: ${{ github.event.pull_request.title }}
+        # Accepts "chore(release): <anything>" and "chore: release ..." with
+        # any scope or none. release-please's default title is
+        # "chore${scope}: release${component} ${version}", where the scope is
+        # the target branch: "chore(main): release 1.12.0".
         run: |
-          if ! echo "$PR_TITLE" | grep -qE '^chore(\(release\))?: '; then
+          if ! echo "$PR_TITLE" | grep -qE '^chore(\(release\): |(\([^()]+\))?: release )'; then
             echo "::error::Release PR title doesn't match expected pattern: $PR_TITLE"
             exit 1
           fi

@@ -43,6 +43,8 @@ jobs:
     secrets: inherit
 ```
 
+`release-pr-check.yml` passes a title that is `chore(release): …`, or `chore: release …` with any scope or none. That covers release-please's default (`chore(main): release 1.12.0`) and the patterns the org's repos set: `chore: release ${version}`, `chore(release): ${version}` and `chore(${component}): release ${version}`.
+
 ### With Doppler + Matrix
 
 ```yaml
