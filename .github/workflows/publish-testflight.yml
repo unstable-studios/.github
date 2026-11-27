@@ -71,6 +71,18 @@ name: Publish TestFlight
 # credentials. On GitHub's runners signing uses the login keychain, as
 # before. On both, the build goes to $RUNNER_TEMP and the key and build
 # are deleted at the end.
+#
+# Signing on a self-hosted runner makes an Apple Development certificate
+# ("Created via API") whose private key is in the job keychain. Once that
+# key is deleted the certificate is useless, and while it exists the next
+# run fails ("Your account already has an Apple Development signing
+# certificate for this machine"). So before the key and the keychain are
+# deleted, and also when an earlier step failed, the job revokes each
+# certificate whose private key is in the job keychain: it reads their
+# serial numbers, lists the account's DEVELOPMENT certificates with the
+# App Store Connect API, and deletes the one with each serial. No other
+# certificate on the account is touched. A failed revocation fails the job
+# and leaves the rest of cleanup to run.
 
 on:
   workflow_call:
@@ -322,6 +334,7 @@ jobs:
           fi
 
       - name: Archive, sign and upload
+        id: archive
         env:
           # Identifiers, not secrets: Doppler syncs unmasked values to
           # GitHub as variables. They show in this job's log.
@@ -371,6 +384,175 @@ jobs:
             "${sign_in[@]}"
 
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
+
+      # Self-hosted only, after the upload whether or not it worked, and
+      # before the key and the keychain are deleted. Signing with
+      # -allowProvisioningUpdates makes an Apple Development certificate
+      # ("Created via API") for this Mac, with its private key in the job
+      # keychain. Cleanup deletes that key, and while the certificate
+      # exists the next run fails ("Your account already has an Apple
+      # Development signing certificate for this machine, but its private
+      # key is not installed in your keychain"). So this revokes each
+      # certificate whose private key is in the job keychain, found on the
+      # account by serial number. The keychain is new each job, so every
+      # key in it is the job's; certificates without their key there (the
+      # account's others) are never touched. If signing worked but no such
+      # key is in the job keychain (it went to the data protection
+      # keychain, say), the step fails: the certificate would be left
+      # behind. A failure fails the job; the steps after it still run.
+      - name: Revoke the job's Apple Development certificate
+        if: always() && runner.environment == 'self-hosted'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+          ARCHIVE_OUTCOME: ${{ steps.archive.outcome }}
+        run: |
+          trap 'echo "::error::Revoking the job'"'"'s Apple Development certificate stopped at line $LINENO. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."' ERR
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          key="$RUNNER_TEMP/asc-key.p8"
+          if [ ! -e "$keychain" ]; then
+            echo "No job keychain, so no certificate to revoke."
+            exit 0
+          fi
+          umask 077
+          work=$(mktemp -d "$RUNNER_TEMP/revoke.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+
+          # Uppercase hex without leading zeros. A serial is a positive
+          # integer (RFC 5280, 4.1.2.2); openssl prints it a byte at a
+          # time, so it can start with 0, and Apple's API may not.
+          normalize() {
+            local s
+            s=$(printf '%s' "$1" | tr '[:lower:]' '[:upper:]' | tr -cd '0-9A-F' | sed 's/^0*//')
+            echo "${s:-0}"
+          }
+
+          # Identities: certificates whose private key is in the job
+          # keychain, by SHA-1. find-identity lists them twice (all, then
+          # valid only).
+          security find-identity -p codesigning "$keychain" > "$work/identities"
+          awk '$2 ~ /^[0-9A-F]{40}$/ && /"Apple Development: / { print $2 }' "$work/identities" | sort -u > "$work/hashes"
+
+          # Every certificate in the keychain, one file each.
+          security find-certificate -a -p "$keychain" > "$work/all.pem" 2>/dev/null || true
+          awk -v dir="$work" '/-----BEGIN CERTIFICATE-----/ { n++ } n { print > (dir "/cert-" n ".pem") }' "$work/all.pem"
+          : > "$work/serials"
+          for pem in "$work"/cert-*.pem; do
+            [ -e "$pem" ] || continue
+            sha1=$(/usr/bin/openssl x509 -in "$pem" -noout -fingerprint -sha1 | sed 's/^.*=//' | tr -d ':' | tr '[:lower:]' '[:upper:]')
+            subject=$(/usr/bin/openssl x509 -in "$pem" -noout -subject | sed 's/^subject= *//')
+            serial=$(/usr/bin/openssl x509 -in "$pem" -noout -serial | sed 's/^serial=//')
+            if grep -qxF -e "$sha1" "$work/hashes"; then
+              printf '%s\t%s\n' "$(normalize "$serial")" "$subject" >> "$work/serials"
+            elif [[ $subject == *"Apple Development:"* ]]; then
+              echo "::warning::Not revoking $subject (serial $serial): its private key isn't in the job keychain."
+            fi
+          done
+
+          fail() {
+            echo "::error::$1 The job's Apple Development certificate (serial $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')) wasn't revoked. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+            exit 1
+          }
+          if [ "$(wc -l < "$work/serials")" -ne "$(wc -l < "$work/hashes")" ]; then
+            fail "The job keychain has $(wc -l < "$work/hashes" | tr -d ' ') Apple Development identities but $(wc -l < "$work/serials" | tr -d ' ') of their certificates were read."
+          fi
+          if [ ! -s "$work/serials" ]; then
+            # A signed archive needs an Apple Development key. If it isn't
+            # here, it's elsewhere (the data protection keychain, say),
+            # cleanup deletes it, and its certificate is left behind.
+            if [ "$ARCHIVE_OUTCOME" = success ]; then
+              echo "::error::Signing worked, but no Apple Development identity is in the job keychain, so nothing was revoked. Check the account for this run's \"Created via API\" certificate and revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+              exit 1
+            fi
+            echo "No Apple Development certificate with its key in the job keychain, so none to revoke."
+            exit 0
+          fi
+          echo "To revoke, by serial: $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')"
+          [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] || fail "ASC_KEY_ID or ASC_ISSUER_ID is not a variable in this environment."
+          [ -s "$key" ] || fail "The App Store Connect key isn't at $key."
+
+          # The App Store Connect token: an ES256 JWT that expires in 10
+          # minutes (https://developer.apple.com/documentation/appstoreconnectapi/generating-tokens-for-api-requests).
+          # openssl signs in DER, SEQUENCE { INTEGER r, INTEGER s }; a JWS
+          # ES256 signature is r and s as 32 bytes each, big-endian
+          # (RFC 7518, 3.4).
+          b64url() { /usr/bin/openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          now=$(date +%s)
+          header=$(/usr/bin/jq -cjn --arg kid "$ASC_KEY_ID" '{alg: "ES256", kid: $kid, typ: "JWT"}' | b64url)
+          payload=$(/usr/bin/jq -cjn --arg iss "$ASC_ISSUER_ID" --argjson iat "$now" --argjson exp "$((now + 600))" \
+            '{iss: $iss, iat: $iat, exp: $exp, aud: "appstoreconnect-v1"}' | b64url)
+          printf '%s' "$header.$payload" | /usr/bin/openssl dgst -sha256 -sign "$key" -out "$work/sig.der" \
+            || fail "Couldn't sign the App Store Connect token."
+          /usr/bin/openssl asn1parse -inform DER -in "$work/sig.der" > "$work/sig.txt" \
+            || fail "Couldn't read the token's signature."
+          raw=""
+          while IFS= read -r int; do
+            int=$(printf '%s' "$int" | sed 's/^0*//')
+            [[ $int =~ ^[0-9A-Fa-f]{0,64}$ ]] || fail "The token's signature isn't an ES256 signature."
+            raw+=$(printf '%64s' "$int" | tr ' ' 0)
+          done < <(awk -F: '/prim: *INTEGER/ { print $NF }' "$work/sig.txt")
+          [ "${#raw}" -eq 128 ] || fail "The token's signature isn't an ES256 signature."
+          jwt="$header.$payload.$(printf '%s' "$raw" | /usr/bin/xxd -r -p | b64url)"
+          echo "::add-mask::$jwt"
+          # In a file, not on curl's command line, where ps would show it.
+          printf 'Authorization: Bearer %s\n' "$jwt" > "$work/auth"
+          unset jwt
+
+          api_base="https://api.appstoreconnect.apple.com/v1"
+          api() {
+            /usr/bin/curl -sS --retry 3 --max-time 60 -o "$work/response" -w '%{http_code}' \
+              -X "$1" -H @"$work/auth" "$2"
+          }
+          api_errors() { /usr/bin/jq -r '[.errors[]? | .detail // .title] | join(" ")' "$work/response" 2>/dev/null || true; }
+
+          # The account's Apple Development certificates, compared by
+          # serial here: filter[serialNumber] doesn't say which format it
+          # matches (https://developer.apple.com/documentation/appstoreconnectapi/get-v1-certificates).
+          : > "$work/account"
+          url="$api_base/certificates?filter%5BcertificateType%5D=DEVELOPMENT&fields%5Bcertificates%5D=serialNumber&limit=200"
+          while [ -n "$url" ]; do
+            # The token goes only to Apple's API.
+            [[ $url == "$api_base/"* ]] || fail "The certificate list links to $url, outside the App Store Connect API."
+            status=$(api GET "$url") || fail "Couldn't list the account's certificates."
+            [ "$status" = 200 ] || fail "Listing the account's certificates returned HTTP $status. $(api_errors)"
+            /usr/bin/jq -r '.data[] | [.id, .attributes.serialNumber] | @tsv' "$work/response" >> "$work/account" \
+              || fail "Couldn't read the account's certificates."
+            url=$(/usr/bin/jq -r '.links.next // empty' "$work/response")
+          done
+
+          failed=0
+          while IFS=$'\t' read -r serial subject; do
+            ids=()
+            while IFS=$'\t' read -r id account_serial; do
+              if [ "$(normalize "$account_serial")" = "$serial" ]; then ids+=("$id"); fi
+            done < "$work/account"
+            if [ "${#ids[@]}" -ne 1 ]; then
+              echo "::error::$subject (serial $serial) matches ${#ids[@]} Apple Development certificates on the account, not one, so it wasn't revoked. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+              failed=1
+              continue
+            fi
+            id=${ids[0]}
+            if ! [[ $id =~ ^[A-Za-z0-9]+$ ]]; then
+              echo "::error::The account returned an unexpected id for serial $serial, so it wasn't revoked."
+              failed=1
+              continue
+            fi
+            # https://developer.apple.com/documentation/appstoreconnectapi/delete-v1-certificates-_id_
+            status=$(api DELETE "$api_base/certificates/$id") || status="no response"
+            case "$status" in
+              204) echo "Revoked $subject (serial $serial, id $id)." ;;
+              # Listed moments ago, so most likely a retry after a
+              # revocation whose answer was lost.
+              404) echo "$subject (serial $serial, id $id) wasn't found, so it's most likely revoked already." ;;
+              *)
+                echo "::error::Revoking $subject (serial $serial, id $id) returned HTTP $status. $(api_errors) Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+                failed=1
+                ;;
+            esac
+          done < "$work/serials"
+          exit "$failed"
 
       - name: Remove the key and the build
         if: always()
