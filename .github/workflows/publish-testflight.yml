@@ -19,14 +19,25 @@ name: Publish TestFlight
 # GitHub's xcode-27 runner when it isn't set. It is never the CI pool
 # (RUNS_ON_MACOS): those runners keep their accounts between jobs and run
 # every pull request's build, so a dependency in any of them could leave a
-# process behind that reads the key during a later upload. The publish
-# runner must be one only publish jobs use: its own account and its own
-# label, outside the CI pool.
+# process behind that reads the key during a later upload. The job fails
+# early on a CI pool runner (named echo-macaroni-<n>).
 #
-# A self-hosted runner also keeps its home folder between jobs, so the job
-# leaves nothing there: it signs with a keychain of its own in
-# $RUNNER_TEMP, builds into $RUNNER_TEMP, and its last step deletes the
-# key, the keychain, the build and any provisioning profile it downloaded.
+# A publish runner is one only publish jobs use, one runner per account,
+# outside the CI pool: the keychain list and provisioning profiles are per
+# account, so two runners sharing one would undo each other's. What keeps
+# other workflows off it is the org runner group testflight-publish
+# (selected repos tabstash-apple and rabbithole-apple, workflows limited to
+# unstable-studios/.github/.github/workflows/publish-testflight.yml@refs/heads/main),
+# not its label. The calling repo's own code on the allowed branch still
+# runs there during the archive (build phases, package plugins), with the
+# key on disk.
+#
+# A self-hosted runner keeps its home folder between jobs, so there the job
+# signs with a keychain of its own in $RUNNER_TEMP and its last step
+# deletes it, restores the account's keychain list and removes any
+# provisioning profile it downloaded. On GitHub's runners signing uses the
+# login keychain, as before. On both, the build goes to $RUNNER_TEMP and
+# the key and build are deleted at the end.
 
 on:
   workflow_call:
@@ -149,11 +160,23 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
-      # A keychain for this job only, and the only one xcodebuild sees, so
-      # anything signing creates (an Apple Development key, for one) goes
-      # there and is deleted with it. The account's own list is restored at
-      # the end.
+      - name: Refuse a CI pool runner
+        if: runner.environment == 'self-hosted'
+        env:
+          NAME: ${{ runner.name }}
+        run: |
+          if [[ $NAME =~ ^echo-macaroni-[0-9]+$ ]]; then
+            echo "::error::$NAME is in the CI pool, which runs pull requests' code. Publish from a runner only publish jobs use (RUNS_ON_MACOS_PUBLISH)."
+            exit 1
+          fi
+
+      # Self-hosted only: a keychain for this job, and the only one
+      # xcodebuild sees, so anything signing creates (an Apple Development
+      # key, for one) goes there and is deleted with it. The account's own
+      # list is restored at the end.
       - name: Create a keychain for this job
+        if: runner.environment == 'self-hosted'
+        shell: bash
         run: |
           state="$RUNNER_TEMP/signing"
           mkdir -p "$state"
@@ -168,13 +191,19 @@ jobs:
               esac
             done
           }
-          security list-keychains -d user | unquote | keep > "$state/keychains"
-          { security default-keychain -d user 2>/dev/null || true; } | unquote | keep > "$state/default-keychain"
+          # Each file is moved into place only once it is complete, so
+          # cleanup never restores a list a failed command left empty.
+          security list-keychains -d user | unquote | keep > "$state/keychains.new"
+          { security default-keychain -d user 2>/dev/null || true; } | unquote | keep > "$state/default-keychain.new"
           for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
             for profile in "$dir"/*; do
               if [ -e "$profile" ]; then basename "$profile"; fi
             done
-          done > "$state/profiles"
+          done > "$state/profiles.new"
+          mv "$state/default-keychain.new" "$state/default-keychain"
+          mv "$state/profiles.new" "$state/profiles"
+          # Last: cleanup restores only when this file exists.
+          mv "$state/keychains.new" "$state/keychains"
 
           keychain="$RUNNER_TEMP/signing.keychain-db"
           # Never written down: the keychain is deleted at the end of the job.
@@ -212,7 +241,11 @@ jobs:
           EXPORT_OPTIONS: ${{ inputs.export-options }}
           VERSION: ${{ steps.plan.outputs.version }}
           BUILD: ${{ steps.plan.outputs.build }}
+          # Distribution logs and export staging, which would otherwise
+          # stay in the account's temporary folder.
+          TMPDIR: ${{ runner.temp }}/tmp
         run: |
+          mkdir -p "$TMPDIR"
           : "${ASC_KEY_ID:?ASC_KEY_ID is not a variable in this environment.}"
           : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is not a variable in this environment.}"
           sign_in=(
@@ -248,17 +281,20 @@ jobs:
 
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove the key, the keychain and the build
+      - name: Remove the key and the build
         if: always()
+        run: rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" "$RUNNER_TEMP/tmp"
+
+      - name: Remove the keychain and restore the account's
+        if: always() && runner.environment == 'self-hosted'
+        shell: bash
         run: |
-          # The secrets first, and keep going if a step after fails.
+          # Keep going if one part fails, and fail at the end.
           set +e
           failed=0
-          rm -rf "$RUNNER_TEMP/asc-key.p8" || failed=1
           if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
             security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || failed=1
           fi
-          rm -rf "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" || failed=1
 
           state="$RUNNER_TEMP/signing"
           if [ -f "$state/keychains" ]; then
@@ -271,9 +307,12 @@ jobs:
             else
               security list-keychains -d user -s || failed=1
             fi
-          fi
-          if [ -s "$state/default-keychain" ]; then
-            security default-keychain -d user -s "$(cat "$state/default-keychain")" || failed=1
+            if [ -s "$state/default-keychain" ]; then
+              security default-keychain -d user -s "$(cat "$state/default-keychain")" || failed=1
+            else
+              # There was none: unset it rather than leave the deleted one.
+              security default-keychain -d user -s || failed=1
+            fi
           fi
 
           # Profiles are public, but the runner's home should look as it did.
@@ -291,6 +330,6 @@ jobs:
 
           security list-keychains -d user
           if [ "$failed" -ne 0 ]; then
-            echo "::error::Cleanup didn't finish. Check this runner's keychains and $RUNNER_TEMP."
+            echo "::error::Cleanup didn't finish. Check this runner's keychains and profiles."
             exit 1
           fi
