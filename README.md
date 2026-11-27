@@ -248,7 +248,7 @@ The repo provides `scripts/test`, which takes an iOS major version (`scripts/tes
 - The caller must grant `contents: read` and `pull-requests: read` (the docs-only check lists the pull request's files); without them the run fails at startup.
 - A pull request that only touches docs skips the tests and still reports success. A newer push to a pull request cancels the run before it.
 - It's one job per matrix entry: on GitHub's runners every job is billed a whole minute at the macOS rate.
-- The pool's runners aren't fresh machines. A job there shares a home folder, build caches and simulators with earlier jobs, and a pull request's own scripts run as the runner's account. That's why only private repos see the variable. `publish-testflight.yml` runs there too and cleans up after itself (below).
+- The pool's runners aren't fresh machines. A job there shares a home folder, build caches and simulators with earlier jobs, and a pull request's own scripts run as the runner's account. That's why only private repos see the variable, and why `publish-testflight.yml` never uses it: the signing key would be on a runner that pull requests' code runs on.
 
 ### Publish an iOS App to TestFlight
 
@@ -282,9 +282,10 @@ The job runs in the calling repo's `testflight` environment and reads the App St
 - The build number is the time in UTC to the minute (`202611251630`), so it rises across re-runs, renamed workflows and several callers alike.
 - The key's ID and issuer ID show in the job's log, because `xcodebuild` prints its command line. They are no use without the key file. In a public repo they would be public.
 - The repo provides an export options plist (default `Config/TestFlight-ExportOptions.plist`) with `method` `app-store-connect` and `destination` `upload`, and its Info.plist answers the export compliance question (`ITSAppUsesNonExemptEncryption`).
-- The Mac is the org's macOS runner pool when the org variable `RUNS_ON_MACOS` is set (private repos), and GitHub's `xcode-27` otherwise, with Xcode 27.2 on either. `runs-on` and `xcode-path` override both. `vars.RUNS_ON` doesn't apply: it names a Linux runner.
-- On the pool, a job's runner keeps its home folder, so the job leaves nothing signing-related there: it signs with a keychain it creates in `$RUNNER_TEMP` and makes the only one on the account's search list, builds with `-derivedDataPath` in `$RUNNER_TEMP`, and its last step (`if: always()`) restores the account's keychain list, deletes that keychain, the key file, the archive, the build and any provisioning profile the job downloaded.
-- Uploads from one repo run one at a time (the concurrency group is per repo and environment); other repos' uploads run on the pool's other runners.
+- The Mac is the runner the org variable `RUNS_ON_MACOS_PUBLISH` names, and GitHub's `xcode-27` when it isn't set, with Xcode 27.2 on either. `runs-on` and `xcode-path` override both. The publish runner is one only publish jobs use, with its own account and label, outside the CI pool (`RUNS_ON_MACOS`), so no pull request's build can leave a process behind there that reads the key. `vars.RUNS_ON` doesn't apply: it names a Linux runner.
+- A self-hosted runner keeps its home folder, so the job leaves nothing signing-related there: it signs with a keychain it creates in `$RUNNER_TEMP` and makes the only one on the account's search list, builds with `-derivedDataPath` in `$RUNNER_TEMP`, and its last step (`if: always()`) deletes the key file, that keychain, the archive and the build, then restores the account's keychain list and removes any provisioning profile the job downloaded.
+- Each run's keychain is new, so `xcodebuild archive` may create a new Apple Development certificate each time. Revoke old ones in Certificates, Identifiers & Profiles if the team reaches Apple's limit.
+- Uploads from one repo run one at a time (the concurrency group is per repo and environment).
 
 First used by `rabbithole-apple`.
 
@@ -317,7 +318,7 @@ jobs:
 ## Conventions
 
 - **Package manager**: pnpm everywhere
-- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. It's set at the org level for private repos (`unstable-studios/echo-core`, decision 0007). `ci-apple.yml` needs a Mac and uses `vars.RUNS_ON_MACOS` the same way. So does `publish-testflight.yml`, which also takes a `runs-on` input to override it.
+- **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. It's set at the org level for private repos (`unstable-studios/echo-core`, decision 0007). `ci-apple.yml` needs a Mac and uses `vars.RUNS_ON_MACOS` the same way. `publish-testflight.yml` uses `vars.RUNS_ON_MACOS_PUBLISH`, a runner only publish jobs use, and takes a `runs-on` input to override it.
 - **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; the runner keeps the pnpm store on the host instead. Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
 - **Concurrency**: CI cancels in-progress; deploys and releases do not.
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.

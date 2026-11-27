@@ -15,12 +15,18 @@ name: Publish TestFlight
 # The caller must pass the secret by name (ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}),
 # even though it only exists in the environment.
 #
-# The Mac is the org's macOS runner pool when the variable RUNS_ON_MACOS
-# names it (private repos), and GitHub's xcode-27 runner otherwise. The
-# pool's runners keep their home folder between jobs, so the job leaves
-# nothing there: it signs with a keychain of its own in $RUNNER_TEMP,
-# builds into $RUNNER_TEMP, and its last step deletes the keychain, the
-# key, the build and any provisioning profile it downloaded.
+# The Mac is the one the org variable RUNS_ON_MACOS_PUBLISH names, and
+# GitHub's xcode-27 runner when it isn't set. It is never the CI pool
+# (RUNS_ON_MACOS): those runners keep their accounts between jobs and run
+# every pull request's build, so a dependency in any of them could leave a
+# process behind that reads the key during a later upload. The publish
+# runner must be one only publish jobs use: its own account and its own
+# label, outside the CI pool.
+#
+# A self-hosted runner also keeps its home folder between jobs, so the job
+# leaves nothing there: it signs with a keychain of its own in
+# $RUNNER_TEMP, builds into $RUNNER_TEMP, and its last step deletes the
+# key, the keychain, the build and any provisioning profile it downloaded.
 
 on:
   workflow_call:
@@ -58,7 +64,7 @@ on:
         type: string
         default: "testflight"
       runs-on:
-        description: "Runner label. It must have the Xcode at xcode-path. Empty uses vars.RUNS_ON_MACOS, or GitHub's xcode-27 when that isn't set."
+        description: "Runner label. It must have the Xcode at xcode-path. Empty uses vars.RUNS_ON_MACOS_PUBLISH, or GitHub's xcode-27 when that isn't set. Never a runner that also runs CI."
         type: string
         default: ""
       xcode-path:
@@ -81,8 +87,8 @@ on:
         description: "The build number that was uploaded"
         value: ${{ jobs.upload.outputs.build-number }}
 
-# Scoped to the calling repo: one upload per repo at a time, while other
-# repos' uploads run on the pool's other runners.
+# Scoped to the calling repo: one upload per repo at a time. Uploads from
+# different repos can run at once if the publish runners allow it.
 concurrency:
   group: publish-testflight-${{ inputs.environment }}
   cancel-in-progress: false
@@ -91,8 +97,8 @@ jobs:
   upload:
     name: Upload to TestFlight
     # In the job, not as the input's default, so passing runs-on still wins.
-    # vars are the calling repo's.
-    runs-on: ${{ inputs.runs-on || vars.RUNS_ON_MACOS || 'xcode-27' }}
+    # vars are the calling repo's. Not RUNS_ON_MACOS: see the top of the file.
+    runs-on: ${{ inputs.runs-on || vars.RUNS_ON_MACOS_PUBLISH || 'xcode-27' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # Holds the key. Its rules decide which branches and tags may use it.
     environment: ${{ inputs.environment }}
@@ -151,8 +157,19 @@ jobs:
         run: |
           state="$RUNNER_TEMP/signing"
           mkdir -p "$state"
-          security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//' > "$state/keychains"
-          security default-keychain -d user 2>/dev/null | sed -e 's/^ *"//' -e 's/"$//' > "$state/default-keychain" || true
+          # The account's list and default, without any job keychain an
+          # earlier job failed to remove, and only keychains that exist.
+          unquote() { sed -e 's/^ *"//' -e 's/"$//'; }
+          keep() {
+            while IFS= read -r keychain; do
+              case "$keychain" in
+                ""|*/_temp/*|*/signing.keychain-db) ;;
+                *) if [ -e "$keychain" ]; then echo "$keychain"; fi ;;
+              esac
+            done
+          }
+          security list-keychains -d user | unquote | keep > "$state/keychains"
+          { security default-keychain -d user 2>/dev/null || true; } | unquote | keep > "$state/default-keychain"
           for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
             for profile in "$dir"/*; do
               if [ -e "$profile" ]; then basename "$profile"; fi
@@ -163,7 +180,8 @@ jobs:
           # Never written down: the keychain is deleted at the end of the job.
           password=$(openssl rand -hex 32)
           security create-keychain -p "$password" "$keychain"
-          security set-keychain-settings -lut 3600 "$keychain"
+          # No auto-lock: a long archive mustn't find it locked.
+          security set-keychain-settings "$keychain"
           security unlock-keychain -p "$password" "$keychain"
           security list-keychains -d user -s "$keychain"
           security default-keychain -d user -s "$keychain"
@@ -230,33 +248,49 @@ jobs:
 
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove the keychain, the key and the build
+      - name: Remove the key, the keychain and the build
         if: always()
         run: |
+          # The secrets first, and keep going if a step after fails.
+          set +e
+          failed=0
+          rm -rf "$RUNNER_TEMP/asc-key.p8" || failed=1
+          if [ -e "$RUNNER_TEMP/signing.keychain-db" ]; then
+            security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || failed=1
+          fi
+          rm -rf "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" || failed=1
+
           state="$RUNNER_TEMP/signing"
           if [ -f "$state/keychains" ]; then
             keychains=()
             while IFS= read -r keychain; do
-              if [ -n "$keychain" ]; then keychains+=("$keychain"); fi
+              keychains+=("$keychain")
             done < "$state/keychains"
-            security list-keychains -d user -s "${keychains[@]}"
+            if [ "${#keychains[@]}" -gt 0 ]; then
+              security list-keychains -d user -s "${keychains[@]}" || failed=1
+            else
+              security list-keychains -d user -s || failed=1
+            fi
           fi
           if [ -s "$state/default-keychain" ]; then
-            security default-keychain -d user -s "$(cat "$state/default-keychain")"
+            security default-keychain -d user -s "$(cat "$state/default-keychain")" || failed=1
           fi
-          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
 
-          # Profiles are public, but the pool's homes should look as they did.
+          # Profiles are public, but the runner's home should look as it did.
           if [ -f "$state/profiles" ]; then
             for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
               for profile in "$dir"/*; do
                 if [ -e "$profile" ] && ! grep -qxF "$(basename "$profile")" "$state/profiles"; then
                   echo "Removing $profile"
-                  rm -f "$profile"
+                  rm -f "$profile" || failed=1
                 fi
               done
             done
           fi
+          rm -rf "$state"
 
-          rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" "$state"
           security list-keychains -d user
+          if [ "$failed" -ne 0 ]; then
+            echo "::error::Cleanup didn't finish. Check this runner's keychains and $RUNNER_TEMP."
+            exit 1
+          fi
