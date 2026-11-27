@@ -64,7 +64,11 @@ name: Publish TestFlight
 # (~/Library/Caches/org.swift.swiftpm, ~/Library/org.swift.swiftpm and
 # ~/.swiftpm, which links to them), which hold clones of the app's
 # package dependencies, their fingerprints and parsed manifests but no
-# credentials, and Xcode's preferences. On GitHub's runners signing uses the login keychain, as
+# credentials, and Xcode's preferences. The job also leaves
+# ~/Library/Developer/CoreSimulator, ~/Library/Developer/DVTDownloads,
+# ~/Library/Caches/com.apple.cds*, ~/Library/Logs/CoreSimulator and
+# ~/Library/Containers/com.apple.CoreDevice.*, none of which holds
+# credentials. On GitHub's runners signing uses the login keychain, as
 # before. On both, the build goes to $RUNNER_TEMP and the key and build
 # are deleted at the end.
 
