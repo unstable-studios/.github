@@ -6,7 +6,7 @@ name: Publish TestFlight
 # Signing is automatic with certificates Apple keeps (cloud signing), so the
 # runner holds no distribution certificate. xcodebuild signs in with an App
 # Store Connect team API key whose role is Admin. The key comes from the
-# calling repo's GitHub environment, where Doppler syncs it:
+# calling repo's testflight environment, where Doppler syncs it:
 #
 #   vars.ASC_KEY_ID          The key's ID
 #   vars.ASC_ISSUER_ID       The issuer ID of the team's keys
@@ -31,6 +31,14 @@ name: Publish TestFlight
 # not its label. The calling repo's own code on the allowed branch still
 # runs there during the archive (build phases, package plugins), with the
 # key on disk.
+#
+# The environment is always testflight, written into the job rather than
+# taken as an input. The runner group limits the workflow and the repos, not
+# the branch a caller runs on, so the environment's branch rule (main only)
+# is what keeps workflows on other branches off the publish runner. If a
+# caller could name another environment, a workflow on any branch could run
+# this job there: no key, but on the publish runner, where it could change
+# the account's files before the next real upload.
 #
 # A self-hosted runner keeps its home folder between jobs, so there the job
 # signs with a keychain of its own in $RUNNER_TEMP and its last step
@@ -70,10 +78,6 @@ on:
         description: "Path to the export options plist (method app-store-connect, destination upload)"
         type: string
         default: "Config/TestFlight-ExportOptions.plist"
-      environment:
-        description: "GitHub environment that holds the App Store Connect key"
-        type: string
-        default: "testflight"
       runs-on:
         description: "Runner label. It must have the Xcode at xcode-path. Empty uses vars.RUNS_ON_MACOS_PUBLISH, or GitHub's xcode-27 when that isn't set. Never a runner that also runs CI."
         type: string
@@ -101,7 +105,7 @@ on:
 # Scoped to the calling repo: one upload per repo at a time. Uploads from
 # different repos can run at once if the publish runners allow it.
 concurrency:
-  group: publish-testflight-${{ inputs.environment }}
+  group: publish-testflight
   cancel-in-progress: false
 
 jobs:
@@ -111,8 +115,10 @@ jobs:
     # vars are the calling repo's. Not RUNS_ON_MACOS: see the top of the file.
     runs-on: ${{ inputs.runs-on || vars.RUNS_ON_MACOS_PUBLISH || 'xcode-27' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
-    # Holds the key. Its rules decide which branches and tags may use it.
-    environment: ${{ inputs.environment }}
+    # Holds the key. Its rules decide which branches and tags may use it,
+    # and so which may run on the publish runner. Fixed: see the top of the
+    # file.
+    environment: testflight
     permissions:
       contents: read
     outputs:
