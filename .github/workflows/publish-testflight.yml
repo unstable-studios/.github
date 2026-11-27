@@ -53,7 +53,8 @@ name: Publish TestFlight
 # with the Mac's hardware UUID), which the search list doesn't cover and
 # which may hold the Apple Development key. secd, the account's keychain
 # daemon, keeps that database open between jobs, so the job stops it at
-# the start and around the removal. What stays: SwiftPM's caches
+# the start and around the removal. A job that finds one an earlier job
+# left fails before it builds. What stays: SwiftPM's caches
 # (~/Library/Caches/org.swift.swiftpm, ~/Library/org.swift.swiftpm and
 # ~/.swiftpm, which links to them), which hold clones of the app's
 # package dependencies, their fingerprints and parsed manifests but no
@@ -164,18 +165,22 @@ jobs:
           state="$RUNNER_TEMP/signing"
           mkdir -p "$state"
           # secd, the account's keychain daemon, keeps running between
-          # jobs. Stop it so the job doesn't start with a database an
-          # earlier cleanup removed still open. launchd starts it again
-          # when something next asks for it.
+          # jobs, and launchd can start it again after cleanup stopped it.
+          # Stop it so the job starts with no database held open. launchd
+          # starts it again when something next asks for it.
           pkill -U "$(id -u)" -x secd || true
           keychains_dir="$HOME/Library/Keychains"
           if [ -d "$keychains_dir" ]; then
-            find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
+            # A data protection keychain here is one an earlier job left
+            # (cleanup never ran, or it came back after). Cleanup would
+            # keep it, with whatever signing adds, so stop instead.
             for entry in "$keychains_dir"/*-*-*-*-*; do
               if [ -d "$entry" ]; then
-                echo "::warning::$entry was here before the job, so cleanup keeps it, with anything signing adds to it."
+                echo "::error::$entry is left from an earlier job. Remove it as this runner's account, then run the job again."
+                exit 1
               fi
             done
+            find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
           else
             : > "$state/keychain-files.new"
             # Cleanup removes the folder the job creates.
@@ -374,7 +379,7 @@ jobs:
           if [ -f "$state/profiles" ]; then
             for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
               for profile in "$dir"/*; do
-                if [ -e "$profile" ] && ! grep -qxF "$(basename "$profile")" "$state/profiles"; then
+                if [ -e "$profile" ] && ! grep -qxF -e "$(basename "$profile")" "$state/profiles"; then
                   echo "Removing $profile"
                   rm -f "$profile" || failed=1
                 fi
@@ -418,23 +423,28 @@ jobs:
           new_keychain_files() {
             if [ -d "$keychains_dir" ]; then
               find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | while IFS= read -r entry; do
-                if ! grep -qxF "$entry" "$state/keychain-files"; then
+                if [ -n "$entry" ] && ! grep -qxF -e "$entry" "$state/keychain-files"; then
                   echo "$entry"
                 fi
               done
             fi
           }
-          stop_secd || { echo "::error::secd didn't stop."; failed=1; }
-          if [ -f "$state/keychain-files" ] && [ -n "$(new_keychain_files)" ]; then
-            while IFS= read -r entry; do
-              echo "Removing $keychains_dir/$entry"
-              rm -rf "${keychains_dir:?}/$entry" || failed=1
-            done < <(new_keychain_files)
+          if [ -f "$state/keychain-files" ]; then
             stop_secd || { echo "::error::secd didn't stop."; failed=1; }
-          fi
-          if [ -f "$state/keychain-files" ] && [ -n "$(new_keychain_files)" ]; then
-            echo "::error::$keychains_dir still has entries the job made: $(new_keychain_files | tr '\n' ' ')"
-            failed=1
+            # A few tries: secd's scheduled tasks can start it again, and
+            # it recreates the folder.
+            for _ in 1 2 3; do
+              if [ -z "$(new_keychain_files)" ]; then break; fi
+              while IFS= read -r entry; do
+                echo "Removing $keychains_dir/$entry"
+                rm -rf "${keychains_dir:?}/${entry:?}" || failed=1
+              done < <(new_keychain_files)
+              stop_secd || { echo "::error::secd didn't stop."; failed=1; }
+            done
+            if [ -n "$(new_keychain_files)" ]; then
+              echo "::error::$keychains_dir still has entries the job made: $(new_keychain_files | tr '\n' ' ')"
+              failed=1
+            fi
           fi
           if [ -f "$state/no-keychains-dir" ] && [ -d "$keychains_dir" ]; then
             rmdir "$keychains_dir" || failed=1
@@ -442,6 +452,7 @@ jobs:
           rm -rf "$state"
 
           security list-keychains -d user
+          security default-keychain -d user || echo "No default keychain."
           if [ "$failed" -ne 0 ]; then
             echo "::error::Cleanup didn't finish. Check this runner's keychains and profiles."
             exit 1
