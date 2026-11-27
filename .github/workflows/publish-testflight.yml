@@ -64,7 +64,11 @@ name: Publish TestFlight
 # (~/Library/Caches/org.swift.swiftpm, ~/Library/org.swift.swiftpm and
 # ~/.swiftpm, which links to them), which hold clones of the app's
 # package dependencies, their fingerprints and parsed manifests but no
-# credentials, and Xcode's preferences. On GitHub's runners signing uses the login keychain, as
+# credentials, and Xcode's preferences. The job also leaves
+# ~/Library/Developer/CoreSimulator, ~/Library/Developer/DVTDownloads,
+# ~/Library/Caches/com.apple.cds*, ~/Library/Logs/CoreSimulator and
+# ~/Library/Containers/com.apple.CoreDevice.*, none of which holds
+# credentials. On GitHub's runners signing uses the login keychain, as
 # before. On both, the build goes to $RUNNER_TEMP and the key and build
 # are deleted at the end.
 
@@ -193,8 +197,8 @@ jobs:
           # secd, the account's keychain daemon, keeps running between
           # jobs, and its scheduled tasks can start it again after cleanup
           # stopped it, recreating the data protection keychain. Stop it,
-          # and wait for it to exit, before removing that keychain: SQLite
-          # calls unlinking an open database undefined
+          # and wait for it to exit, before removing that keychain:
+          # unlinking an open SQLite database can corrupt it
           # (https://www.sqlite.org/howtocorrupt.html). launchd starts it
           # again when something next asks for it.
           stop_secd || { echo "::error::secd didn't stop."; exit 1; }
@@ -206,7 +210,10 @@ jobs:
             fi
           done
           if [ -d "$keychains_dir" ]; then
-            find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
+            # Not the <UUID> folders: one recreated since the removal above
+            # isn't the account's own, and cleanup must not keep it. Files
+            # with that shape of name stay, as the removal leaves them.
+            find "$keychains_dir" -mindepth 1 -maxdepth 1 ! \( -type d -name '*-*-*-*-*' \) -exec basename {} \; > "$state/keychain-files.new"
           else
             : > "$state/keychain-files.new"
             # Cleanup removes the folder the job creates.
@@ -418,8 +425,8 @@ jobs:
           # hold the Apple Development key signing made. secd, the
           # account's keychain daemon, stays running between jobs with the
           # database open: removing the files alone would leave it serving
-          # the old one to the next job, and SQLite calls unlinking an open
-          # database undefined (https://www.sqlite.org/howtocorrupt.html).
+          # the old one to the next job, and unlinking an open SQLite
+          # database can corrupt it (https://www.sqlite.org/howtocorrupt.html).
           # So stop secd first, remove the files, then stop it again in
           # case a process relaunched it in between, and fail if the job's
           # entries came back. launchd starts secd again when something
