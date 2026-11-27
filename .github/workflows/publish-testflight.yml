@@ -40,6 +40,10 @@ name: Publish TestFlight
 # this job there: no key, but on the publish runner, where it could change
 # the account's files before the next real upload.
 #
+# Create the testflight environment with its main branch rule before adding
+# a repo to the testflight-publish runner group; GitHub creates a missing
+# environment on first use with no protection rules.
+#
 # A self-hosted runner keeps its home folder between jobs, so there the job
 # signs with a keychain of its own in $RUNNER_TEMP and its last step
 # deletes it, restores the account's keychain list and removes any
