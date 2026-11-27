@@ -334,6 +334,7 @@ jobs:
           fi
 
       - name: Archive, sign and upload
+        id: archive
         env:
           # Identifiers, not secrets: Doppler syncs unmasked values to
           # GitHub as variables. They show in this job's log.
@@ -395,8 +396,10 @@ jobs:
       # certificate whose private key is in the job keychain, found on the
       # account by serial number. The keychain is new each job, so every
       # key in it is the job's; certificates without their key there (the
-      # account's others) are never touched. A failure fails the job; the
-      # steps after it still run.
+      # account's others) are never touched. If signing worked but no such
+      # key is in the job keychain (it went to the data protection
+      # keychain, say), the step fails: the certificate would be left
+      # behind. A failure fails the job; the steps after it still run.
       - name: Revoke the job's Apple Development certificate
         if: always() && runner.environment == 'self-hosted'
         timeout-minutes: 5
@@ -404,6 +407,7 @@ jobs:
         env:
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
+          ARCHIVE_OUTCOME: ${{ steps.archive.outcome }}
         run: |
           trap 'echo "::error::Revoking the job'"'"'s Apple Development certificate stopped at line $LINENO. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."' ERR
           keychain="$RUNNER_TEMP/signing.keychain-db"
@@ -455,10 +459,17 @@ jobs:
             fail "The job keychain has $(wc -l < "$work/hashes" | tr -d ' ') Apple Development identities but $(wc -l < "$work/serials" | tr -d ' ') of their certificates were read."
           fi
           if [ ! -s "$work/serials" ]; then
+            # A signed archive needs an Apple Development key. If it isn't
+            # here, it's elsewhere (the data protection keychain, say),
+            # cleanup deletes it, and its certificate is left behind.
+            if [ "$ARCHIVE_OUTCOME" = success ]; then
+              echo "::error::Signing worked, but no Apple Development identity is in the job keychain, so nothing was revoked. Check the account for this run's \"Created via API\" certificate and revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+              exit 1
+            fi
             echo "No Apple Development certificate with its key in the job keychain, so none to revoke."
             exit 0
           fi
-          echo "To revoke, by serial: $(cut -f1 "$work/serials" | tr '\n' ' ')"
+          echo "To revoke, by serial: $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')"
           [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] || fail "ASC_KEY_ID or ASC_ISSUER_ID is not a variable in this environment."
           [ -s "$key" ] || fail "The App Store Connect key isn't at $key."
 
@@ -532,8 +543,9 @@ jobs:
             status=$(api DELETE "$api_base/certificates/$id") || status="no response"
             case "$status" in
               204) echo "Revoked $subject (serial $serial, id $id)." ;;
-              # A retry after a revocation whose answer was lost.
-              404) echo "$subject (serial $serial, id $id) is already revoked." ;;
+              # Listed moments ago, so most likely a retry after a
+              # revocation whose answer was lost.
+              404) echo "$subject (serial $serial, id $id) wasn't found, so it's most likely revoked already." ;;
               *)
                 echo "::error::Revoking $subject (serial $serial, id $id) returned HTTP $status. $(api_errors) Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
                 failed=1
