@@ -52,14 +52,19 @@ name: Publish TestFlight
 # create the account's data protection keychain there (a folder named
 # with the Mac's hardware UUID), which the search list doesn't cover and
 # which may hold the Apple Development key. secd, the account's keychain
-# daemon, keeps that database open between jobs, so the job stops it at
-# the start and around the removal. A job that finds one an earlier job
-# left fails before it builds. What stays: SwiftPM's caches
+# daemon, keeps that database open between jobs and can start again
+# between them, so the job stops it at the start, removes any data
+# protection keychain an earlier job left, and stops it again around the
+# final removal. Cleanup also deletes Xcode's URL caches and HTTP stores
+# (com.apple.dt.xcodebuild, com.apple.dt.Xcode.ITunesSoftwareService and
+# com.apple.itunes.swinfo under ~/Library/Caches and ~/Library/HTTPStorages,
+# and ~/Library/Application Support/com.apple.dt.Xcode.ITunesSoftwareService):
+# a URL cache keeps request headers, which can include the App Store
+# Connect token made from the key. What stays: SwiftPM's caches
 # (~/Library/Caches/org.swift.swiftpm, ~/Library/org.swift.swiftpm and
 # ~/.swiftpm, which links to them), which hold clones of the app's
 # package dependencies, their fingerprints and parsed manifests but no
-# credentials, and the preferences and caches Xcode keeps for any
-# account. On GitHub's runners signing uses the login keychain, as
+# credentials, and Xcode's preferences. On GitHub's runners signing uses the login keychain, as
 # before. On both, the build goes to $RUNNER_TEMP and the key and build
 # are deleted at the end.
 
@@ -164,22 +169,43 @@ jobs:
         run: |
           state="$RUNNER_TEMP/signing"
           mkdir -p "$state"
-          # secd, the account's keychain daemon, keeps running between
-          # jobs, and launchd can start it again after cleanup stopped it.
-          # Stop it so the job starts with no database held open. launchd
-          # starts it again when something next asks for it.
-          pkill -U "$(id -u)" -x secd || true
-          keychains_dir="$HOME/Library/Keychains"
-          if [ -d "$keychains_dir" ]; then
-            # A data protection keychain here is one an earlier job left
-            # (cleanup never ran, or it came back after). Cleanup would
-            # keep it, with whatever signing adds, so stop instead.
-            for entry in "$keychains_dir"/*-*-*-*-*; do
-              if [ -d "$entry" ]; then
-                echo "::error::$entry is left from an earlier job. Remove it as this runner's account, then run the job again."
-                exit 1
-              fi
+          # Waits for the secd processes running now to exit, not for no
+          # secd at all: launchd may start a new one at any time.
+          stop_secd() {
+            local pids=() pid alive
+            while IFS= read -r pid; do pids+=("$pid"); done < <(pgrep -U "$(id -u)" -x secd)
+            if [ "${#pids[@]}" -eq 0 ]; then return 0; fi
+            kill -TERM "${pids[@]}"
+            for _ in $(seq 1 20); do
+              alive=0
+              for pid in "${pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+              done
+              if [ "$alive" -eq 0 ]; then return 0; fi
+              sleep 0.5
             done
+            kill -KILL "${pids[@]}" 2>/dev/null
+            sleep 1
+            for pid in "${pids[@]}"; do
+              if kill -0 "$pid" 2>/dev/null; then return 1; fi
+            done
+          }
+          # secd, the account's keychain daemon, keeps running between
+          # jobs, and its scheduled tasks can start it again after cleanup
+          # stopped it, recreating the data protection keychain. Stop it,
+          # and wait for it to exit, before removing that keychain: SQLite
+          # calls unlinking an open database undefined
+          # (https://www.sqlite.org/howtocorrupt.html). launchd starts it
+          # again when something next asks for it.
+          stop_secd || { echo "::error::secd didn't stop."; exit 1; }
+          keychains_dir="$HOME/Library/Keychains"
+          for entry in "$keychains_dir"/*-*-*-*-*; do
+            if [ -d "$entry" ]; then
+              echo "Removing $entry, left from an earlier job"
+              rm -rf "$entry" || { echo "::error::Couldn't remove $entry."; exit 1; }
+            fi
+          done
+          if [ -d "$keychains_dir" ]; then
             find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
           else
             : > "$state/keychain-files.new"
@@ -449,6 +475,23 @@ jobs:
           if [ -f "$state/no-keychains-dir" ] && [ -d "$keychains_dir" ]; then
             rmdir "$keychains_dir" || failed=1
           fi
+
+          # Xcode's URL caches and HTTP stores. NSURLCache's Cache.db keeps
+          # request headers, which can include the App Store Connect token
+          # xcodebuild made from the key (valid up to 20 minutes).
+          for path in \
+            "$HOME/Library/Caches/com.apple.dt.xcodebuild" \
+            "$HOME/Library/Caches/com.apple.dt.Xcode.ITunesSoftwareService" \
+            "$HOME/Library/Caches/com.apple.itunes.swinfo" \
+            "$HOME/Library/HTTPStorages/com.apple.dt.xcodebuild" \
+            "$HOME/Library/HTTPStorages/com.apple.dt.Xcode.ITunesSoftwareService" \
+            "$HOME/Library/HTTPStorages/com.apple.itunes.swinfo" \
+            "$HOME/Library/Application Support/com.apple.dt.Xcode.ITunesSoftwareService"; do
+            if [ -e "$path" ]; then
+              echo "Removing $path"
+              rm -rf "$path" || failed=1
+            fi
+          done
           rm -rf "$state"
 
           security list-keychains -d user
