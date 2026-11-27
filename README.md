@@ -16,7 +16,7 @@ Org-level reusable GitHub Actions workflows for Unstable Studios.
 | [`preview-cloudflare.yml`](.github/workflows/preview-cloudflare.yml) | Workers PR preview upload + URL comment | `wrangler-subcommand`, `build-script`, `comment-on-pr` |
 | [`deploy-terraform.yml`](.github/workflows/deploy-terraform.yml) | Plan on PR, apply on tag | `working-directory`, `plan-only`, `doppler-project` |
 | [`publish-relay.yml`](.github/workflows/publish-relay.yml) | Publish release artifacts to Relay | `org`, `product`, `version`, `artifact-name`, `artifact-path`, `policy-type` |
-| [`publish-testflight.yml`](.github/workflows/publish-testflight.yml) | Archive an iOS app, sign it and upload it to TestFlight | `project`, `scheme`, `version`, `environment` |
+| [`publish-testflight.yml`](.github/workflows/publish-testflight.yml) | Archive an iOS app, sign it and upload it to TestFlight | `project`, `scheme`, `version` |
 | [`stale.yml`](.github/workflows/stale.yml) | Auto-close stale issues and PRs | `days-before-stale`, `days-before-close` |
 
 ## Usage
@@ -274,10 +274,12 @@ jobs:
 
 Pass `ref` too when the caller has the release's commit (release-please's `sha` output), so the build is the tagged commit even if `main` has moved on.
 
-The job runs in the calling repo's `testflight` environment and reads the App Store Connect key from it: `ASC_KEY_ID` and `ASC_ISSUER_ID` as variables, `ASC_KEY_P8` as a secret. Keep the key in Doppler, in a config of its own, with a GitHub sync to that environment and "Sync unmasked secrets as variables" on. The secret has to be passed by name even though it only exists in the environment ([reusing workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)).
+The job always runs in the calling repo's `testflight` environment, which isn't an input, and reads the App Store Connect key from it: `ASC_KEY_ID` and `ASC_ISSUER_ID` as variables, `ASC_KEY_P8` as a secret. Keep the key in Doppler, in a config of its own, with a GitHub sync to that environment and "Sync unmasked secrets as variables" on. The secret has to be passed by name even though it only exists in the environment ([reusing workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows)).
 
 - Signing is cloud signing: no distribution certificate on the runner. The key is a team key with the Admin role.
 - Limit the environment to the branch the caller runs on (`main` when chained off release-please). Whoever can run a workflow there can use the key.
+- The environment is fixed because its branch rule is also what keeps other branches off the publish runner: the runner group limits the workflow and the repos, not the caller's branch. If a caller could name another environment, a workflow on any branch could run the job on the publish runner without the key and change the account's files before the next real upload.
+- Create the `testflight` environment with its `main` branch rule before adding a repo to the `testflight-publish` runner group; GitHub creates a missing environment on first use with no protection rules ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)).
 - With no `version`, it reads the root package's version from `.release-please-manifest.json`. A `workflow_dispatch` caller then uploads whatever is on the branch it ran for, under the last released version, as a new build.
 - The build number is the time in UTC to the minute (`202611251630`), so it rises across re-runs, renamed workflows and several callers alike.
 - The key's ID and issuer ID show in the job's log, because `xcodebuild` prints its command line. They are no use without the key file. In a public repo they would be public.
@@ -288,7 +290,7 @@ The job runs in the calling repo's `testflight` environment and reads the App St
 - A self-hosted runner keeps its home folder, so there the job signs with a keychain it creates in `$RUNNER_TEMP` and makes the only one on the account's search list. Its last steps (`if: always()`) delete that keychain, restore the account's keychain list and default, and remove any provisioning profile the job downloaded. On GitHub's runners signing uses the login keychain, as before.
 - On both, the build goes to `$RUNNER_TEMP` (`-derivedDataPath`, and `TMPDIR` for distribution logs and export staging), and the key file, archive and build are deleted at the end.
 - On a self-hosted runner each run's keychain is new, so `xcodebuild archive` may create a new Apple Development certificate each time. Revoke old ones in Certificates, Identifiers & Profiles if the team reaches Apple's limit.
-- Uploads from one repo run one at a time (the concurrency group is per repo and environment).
+- Uploads from one repo run one at a time (the concurrency group is per repo).
 
 First used by `rabbithole-apple`.
 
