@@ -206,7 +206,9 @@ jobs:
             fi
           done
           if [ -d "$keychains_dir" ]; then
-            find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
+            # Not the <UUID> folders: one recreated since the removal above
+            # isn't the account's own, and cleanup must not keep it.
+            find "$keychains_dir" -mindepth 1 -maxdepth 1 ! -name '*-*-*-*-*' -exec basename {} \; > "$state/keychain-files.new"
           else
             : > "$state/keychain-files.new"
             # Cleanup removes the folder the job creates.
