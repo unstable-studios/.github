@@ -15,7 +15,7 @@ README.md              # Usage docs and examples
 ## Conventions
 
 - All workflows use `on: workflow_call` — they are never triggered directly
-- Every workflow respects `vars.RUNS_ON` with a default of `ubuntu-latest`, except the two that need a Mac with Xcode: `ci-apple.yml` uses `vars.RUNS_ON_MACOS` and falls back to the GitHub runner named in its matrix, and `publish-testflight.yml` takes a `runs-on` input
+- Every workflow respects `vars.RUNS_ON` with a default of `ubuntu-latest`, except the two that need a Mac with Xcode: `ci-apple.yml` uses `vars.RUNS_ON_MACOS` and falls back to the GitHub runner named in its matrix, and `publish-testflight.yml` uses `vars.RUNS_ON_MACOS`, falling back to `xcode-27`, unless its `runs-on` input names a runner. Jobs on the macOS pool share a home folder with earlier jobs: anything a job writes outside `$RUNNER_TEMP` (keychains, DerivedData, profiles) it must remove in an `always()` step
 - GitHub's cache (`actions/cache`, `setup-*` `cache:`) only on GitHub-hosted runners: `if: runner.environment == 'github-hosted'`. Uploading from the self-hosted echo-turbine runners takes minutes
 - pnpm is the standard package manager across the org
 - Concurrency: CI jobs cancel in-progress; deploy/release jobs do not

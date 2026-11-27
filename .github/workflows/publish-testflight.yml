@@ -4,7 +4,7 @@ name: Publish TestFlight
 # Connect, where it shows under TestFlight.
 #
 # Signing is automatic with certificates Apple keeps (cloud signing), so the
-# runner holds no certificate or profile. xcodebuild signs in with an App
+# runner holds no distribution certificate. xcodebuild signs in with an App
 # Store Connect team API key whose role is Admin. The key comes from the
 # calling repo's GitHub environment, where Doppler syncs it:
 #
@@ -14,6 +14,13 @@ name: Publish TestFlight
 #
 # The caller must pass the secret by name (ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}),
 # even though it only exists in the environment.
+#
+# The Mac is the org's macOS runner pool when the variable RUNS_ON_MACOS
+# names it (private repos), and GitHub's xcode-27 runner otherwise. The
+# pool's runners keep their home folder between jobs, so the job leaves
+# nothing there: it signs with a keychain of its own in $RUNNER_TEMP,
+# builds into $RUNNER_TEMP, and its last step deletes the keychain, the
+# key, the build and any provisioning profile it downloaded.
 
 on:
   workflow_call:
@@ -51,9 +58,9 @@ on:
         type: string
         default: "testflight"
       runs-on:
-        description: "Runner label. It must have the Xcode at xcode-path."
+        description: "Runner label. It must have the Xcode at xcode-path. Empty uses vars.RUNS_ON_MACOS, or GitHub's xcode-27 when that isn't set."
         type: string
-        default: "xcode-27"
+        default: ""
       xcode-path:
         description: "Path to the Xcode app to build with"
         type: string
@@ -74,6 +81,8 @@ on:
         description: "The build number that was uploaded"
         value: ${{ jobs.upload.outputs.build-number }}
 
+# Scoped to the calling repo: one upload per repo at a time, while other
+# repos' uploads run on the pool's other runners.
 concurrency:
   group: publish-testflight-${{ inputs.environment }}
   cancel-in-progress: false
@@ -81,7 +90,9 @@ concurrency:
 jobs:
   upload:
     name: Upload to TestFlight
-    runs-on: ${{ inputs.runs-on }}
+    # In the job, not as the input's default, so passing runs-on still wins.
+    # vars are the calling repo's.
+    runs-on: ${{ inputs.runs-on || vars.RUNS_ON_MACOS || 'xcode-27' }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # Holds the key. Its rules decide which branches and tags may use it.
     environment: ${{ inputs.environment }}
@@ -132,6 +143,32 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
+      # A keychain for this job only, and the only one xcodebuild sees, so
+      # anything signing creates (an Apple Development key, for one) goes
+      # there and is deleted with it. The account's own list is restored at
+      # the end.
+      - name: Create a keychain for this job
+        run: |
+          state="$RUNNER_TEMP/signing"
+          mkdir -p "$state"
+          security list-keychains -d user | sed -e 's/^ *"//' -e 's/"$//' > "$state/keychains"
+          security default-keychain -d user 2>/dev/null | sed -e 's/^ *"//' -e 's/"$//' > "$state/default-keychain" || true
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            for profile in "$dir"/*; do
+              if [ -e "$profile" ]; then basename "$profile"; fi
+            done
+          done > "$state/profiles"
+
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          # Never written down: the keychain is deleted at the end of the job.
+          password=$(openssl rand -hex 32)
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 3600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security default-keychain -d user -s "$keychain"
+          security list-keychains -d user
+
       - name: Write the App Store Connect key
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
@@ -167,6 +204,9 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
           )
           archive="$RUNNER_TEMP/app.xcarchive"
+          # Not ~/Library/Developer/Xcode/DerivedData, which outlives the job
+          # on the pool.
+          derived="$RUNNER_TEMP/DerivedData"
 
           # The app and its extensions must carry the same version and
           # build, so both are set for every target here.
@@ -176,6 +216,7 @@ jobs:
             -configuration Release \
             -destination "generic/platform=iOS" \
             -archivePath "$archive" \
+            -derivedDataPath "$derived" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$BUILD" \
             "${sign_in[@]}"
@@ -189,6 +230,33 @@ jobs:
 
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Remove the key and the archive
+      - name: Remove the keychain, the key and the build
         if: always()
-        run: rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export"
+        run: |
+          state="$RUNNER_TEMP/signing"
+          if [ -f "$state/keychains" ]; then
+            keychains=()
+            while IFS= read -r keychain; do
+              if [ -n "$keychain" ]; then keychains+=("$keychain"); fi
+            done < "$state/keychains"
+            security list-keychains -d user -s "${keychains[@]}"
+          fi
+          if [ -s "$state/default-keychain" ]; then
+            security default-keychain -d user -s "$(cat "$state/default-keychain")"
+          fi
+          security delete-keychain "$RUNNER_TEMP/signing.keychain-db" 2>/dev/null || true
+
+          # Profiles are public, but the pool's homes should look as they did.
+          if [ -f "$state/profiles" ]; then
+            for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+              for profile in "$dir"/*; do
+                if [ -e "$profile" ] && ! grep -qxF "$(basename "$profile")" "$state/profiles"; then
+                  echo "Removing $profile"
+                  rm -f "$profile"
+                fi
+              done
+            done
+          fi
+
+          rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" "$state"
+          security list-keychains -d user
