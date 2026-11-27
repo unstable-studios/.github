@@ -193,8 +193,8 @@ jobs:
           # secd, the account's keychain daemon, keeps running between
           # jobs, and its scheduled tasks can start it again after cleanup
           # stopped it, recreating the data protection keychain. Stop it,
-          # and wait for it to exit, before removing that keychain: SQLite
-          # calls unlinking an open database undefined
+          # and wait for it to exit, before removing that keychain:
+          # unlinking an open SQLite database can corrupt it
           # (https://www.sqlite.org/howtocorrupt.html). launchd starts it
           # again when something next asks for it.
           stop_secd || { echo "::error::secd didn't stop."; exit 1; }
@@ -420,8 +420,8 @@ jobs:
           # hold the Apple Development key signing made. secd, the
           # account's keychain daemon, stays running between jobs with the
           # database open: removing the files alone would leave it serving
-          # the old one to the next job, and SQLite calls unlinking an open
-          # database undefined (https://www.sqlite.org/howtocorrupt.html).
+          # the old one to the next job, and unlinking an open SQLite
+          # database can corrupt it (https://www.sqlite.org/howtocorrupt.html).
           # So stop secd first, remove the files, then stop it again in
           # case a process relaunched it in between, and fail if the job's
           # entries came back. launchd starts secd again when something
