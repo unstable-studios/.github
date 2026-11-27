@@ -46,10 +46,27 @@ name: Publish TestFlight
 #
 # A self-hosted runner keeps its home folder between jobs, so there the job
 # signs with a keychain of its own in $RUNNER_TEMP and its last step
-# deletes it, restores the account's keychain list and removes any
-# provisioning profile it downloaded. On GitHub's runners signing uses the
-# login keychain, as before. On both, the build goes to $RUNNER_TEMP and
-# the key and build are deleted at the end.
+# deletes it, restores the account's keychain list and default, and
+# removes any provisioning profile it downloaded. It also removes anything
+# new in ~/Library/Keychains: the first xcodebuild call can make macOS
+# create the account's data protection keychain there (a folder named
+# with the Mac's hardware UUID), which the search list doesn't cover and
+# which may hold the Apple Development key. secd, the account's keychain
+# daemon, keeps that database open between jobs and can start again
+# between them, so the job stops it at the start, removes any data
+# protection keychain an earlier job left, and stops it again around the
+# final removal. Cleanup also deletes Xcode's URL caches and HTTP stores
+# (com.apple.dt.xcodebuild, com.apple.dt.Xcode.ITunesSoftwareService and
+# com.apple.itunes.swinfo under ~/Library/Caches and ~/Library/HTTPStorages,
+# and ~/Library/Application Support/com.apple.dt.Xcode.ITunesSoftwareService):
+# a URL cache keeps request headers, which can include the App Store
+# Connect token made from the key. What stays: SwiftPM's caches
+# (~/Library/Caches/org.swift.swiftpm, ~/Library/org.swift.swiftpm and
+# ~/.swiftpm, which links to them), which hold clones of the app's
+# package dependencies, their fingerprints and parsed manifests but no
+# credentials, and Xcode's preferences. On GitHub's runners signing uses the login keychain, as
+# before. On both, the build goes to $RUNNER_TEMP and the key and build
+# are deleted at the end.
 
 on:
   workflow_call:
@@ -131,6 +148,73 @@ jobs:
     env:
       DEVELOPER_DIR: ${{ inputs.xcode-path }}/Contents/Developer
     steps:
+      - name: Refuse a CI pool runner
+        if: runner.environment == 'self-hosted'
+        env:
+          NAME: ${{ runner.name }}
+        run: |
+          if [[ $NAME =~ ^echo-macaroni-[0-9]+$ ]]; then
+            echo "::error::$NAME is in the CI pool, which runs pull requests' code. Publish from a runner only publish jobs use (RUNS_ON_MACOS_PUBLISH)."
+            exit 1
+          fi
+
+      # Self-hosted only, and before anything runs Xcode's tools: the
+      # first xcodebuild call can make macOS create the account's data
+      # protection keychain, ~/Library/Keychains/<hardware UUID>, which
+      # the keychain search list doesn't cover. Cleanup removes whatever
+      # is new in that folder.
+      - name: Record the account's keychain folder
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        run: |
+          state="$RUNNER_TEMP/signing"
+          mkdir -p "$state"
+          # Waits for the secd processes running now to exit, not for no
+          # secd at all: launchd may start a new one at any time.
+          stop_secd() {
+            local pids=() pid alive
+            while IFS= read -r pid; do pids+=("$pid"); done < <(pgrep -U "$(id -u)" -x secd)
+            if [ "${#pids[@]}" -eq 0 ]; then return 0; fi
+            kill -TERM "${pids[@]}"
+            for _ in $(seq 1 20); do
+              alive=0
+              for pid in "${pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+              done
+              if [ "$alive" -eq 0 ]; then return 0; fi
+              sleep 0.5
+            done
+            kill -KILL "${pids[@]}" 2>/dev/null
+            sleep 1
+            for pid in "${pids[@]}"; do
+              if kill -0 "$pid" 2>/dev/null; then return 1; fi
+            done
+          }
+          # secd, the account's keychain daemon, keeps running between
+          # jobs, and its scheduled tasks can start it again after cleanup
+          # stopped it, recreating the data protection keychain. Stop it,
+          # and wait for it to exit, before removing that keychain: SQLite
+          # calls unlinking an open database undefined
+          # (https://www.sqlite.org/howtocorrupt.html). launchd starts it
+          # again when something next asks for it.
+          stop_secd || { echo "::error::secd didn't stop."; exit 1; }
+          keychains_dir="$HOME/Library/Keychains"
+          for entry in "$keychains_dir"/*-*-*-*-*; do
+            if [ -d "$entry" ]; then
+              echo "Removing $entry, left from an earlier job"
+              rm -rf "$entry" || { echo "::error::Couldn't remove $entry."; exit 1; }
+            fi
+          done
+          if [ -d "$keychains_dir" ]; then
+            find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; > "$state/keychain-files.new"
+          else
+            : > "$state/keychain-files.new"
+            # Cleanup removes the folder the job creates.
+            touch "$state/no-keychains-dir"
+          fi
+          # Last: cleanup removes entries only when this file exists.
+          mv "$state/keychain-files.new" "$state/keychain-files"
+
       - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.ref }}
@@ -169,16 +253,6 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-
-      - name: Refuse a CI pool runner
-        if: runner.environment == 'self-hosted'
-        env:
-          NAME: ${{ runner.name }}
-        run: |
-          if [[ $NAME =~ ^echo-macaroni-[0-9]+$ ]]; then
-            echo "::error::$NAME is in the CI pool, which runs pull requests' code. Publish from a runner only publish jobs use (RUNS_ON_MACOS_PUBLISH)."
-            exit 1
-          fi
 
       # Self-hosted only: a keychain for this job, and the only one
       # xcodebuild sees, so anything signing creates (an Apple Development
@@ -319,8 +393,10 @@ jobs:
             fi
             if [ -s "$state/default-keychain" ]; then
               security default-keychain -d user -s "$(cat "$state/default-keychain")" || failed=1
-            else
+            elif security default-keychain -d user > /dev/null 2>&1; then
               # There was none: unset it rather than leave the deleted one.
+              # With none set, the command fails ("A default keychain could
+              # not be found"), so it only runs when one is set.
               security default-keychain -d user -s || failed=1
             fi
           fi
@@ -329,16 +405,97 @@ jobs:
           if [ -f "$state/profiles" ]; then
             for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
               for profile in "$dir"/*; do
-                if [ -e "$profile" ] && ! grep -qxF "$(basename "$profile")" "$state/profiles"; then
+                if [ -e "$profile" ] && ! grep -qxF -e "$(basename "$profile")" "$state/profiles"; then
                   echo "Removing $profile"
                   rm -f "$profile" || failed=1
                 fi
               done
             done
           fi
+
+          # Whatever is new in ~/Library/Keychains, such as the data
+          # protection keychain (<hardware UUID>/keychain-2.db), which can
+          # hold the Apple Development key signing made. secd, the
+          # account's keychain daemon, stays running between jobs with the
+          # database open: removing the files alone would leave it serving
+          # the old one to the next job, and SQLite calls unlinking an open
+          # database undefined (https://www.sqlite.org/howtocorrupt.html).
+          # So stop secd first, remove the files, then stop it again in
+          # case a process relaunched it in between, and fail if the job's
+          # entries came back. launchd starts secd again when something
+          # next asks for it.
+          keychains_dir="$HOME/Library/Keychains"
+          # Waits for the secd processes running now to exit, not for no
+          # secd at all: launchd may start a new one at any time.
+          stop_secd() {
+            local pids=() pid alive
+            while IFS= read -r pid; do pids+=("$pid"); done < <(pgrep -U "$(id -u)" -x secd)
+            if [ "${#pids[@]}" -eq 0 ]; then return 0; fi
+            kill -TERM "${pids[@]}"
+            for _ in $(seq 1 20); do
+              alive=0
+              for pid in "${pids[@]}"; do
+                if kill -0 "$pid" 2>/dev/null; then alive=1; fi
+              done
+              if [ "$alive" -eq 0 ]; then return 0; fi
+              sleep 0.5
+            done
+            kill -KILL "${pids[@]}" 2>/dev/null
+            sleep 1
+            for pid in "${pids[@]}"; do
+              if kill -0 "$pid" 2>/dev/null; then return 1; fi
+            done
+          }
+          new_keychain_files() {
+            if [ -d "$keychains_dir" ]; then
+              find "$keychains_dir" -mindepth 1 -maxdepth 1 -exec basename {} \; | while IFS= read -r entry; do
+                if [ -n "$entry" ] && ! grep -qxF -e "$entry" "$state/keychain-files"; then
+                  echo "$entry"
+                fi
+              done
+            fi
+          }
+          if [ -f "$state/keychain-files" ]; then
+            stop_secd || { echo "::error::secd didn't stop."; failed=1; }
+            # A few tries: secd's scheduled tasks can start it again, and
+            # it recreates the folder.
+            for _ in 1 2 3; do
+              if [ -z "$(new_keychain_files)" ]; then break; fi
+              while IFS= read -r entry; do
+                echo "Removing $keychains_dir/$entry"
+                rm -rf "${keychains_dir:?}/${entry:?}" || failed=1
+              done < <(new_keychain_files)
+              stop_secd || { echo "::error::secd didn't stop."; failed=1; }
+            done
+            if [ -n "$(new_keychain_files)" ]; then
+              echo "::error::$keychains_dir still has entries the job made: $(new_keychain_files | tr '\n' ' ')"
+              failed=1
+            fi
+          fi
+          if [ -f "$state/no-keychains-dir" ] && [ -d "$keychains_dir" ]; then
+            rmdir "$keychains_dir" || failed=1
+          fi
+
+          # Xcode's URL caches and HTTP stores. NSURLCache's Cache.db keeps
+          # request headers, which can include the App Store Connect token
+          # xcodebuild made from the key (valid up to 20 minutes).
+          for path in \
+            "$HOME/Library/Caches/com.apple.dt.xcodebuild" \
+            "$HOME/Library/Caches/com.apple.dt.Xcode.ITunesSoftwareService" \
+            "$HOME/Library/Caches/com.apple.itunes.swinfo" \
+            "$HOME/Library/HTTPStorages/com.apple.dt.xcodebuild" \
+            "$HOME/Library/HTTPStorages/com.apple.dt.Xcode.ITunesSoftwareService" \
+            "$HOME/Library/HTTPStorages/com.apple.itunes.swinfo" \
+            "$HOME/Library/Application Support/com.apple.dt.Xcode.ITunesSoftwareService"; do
+            if [ -e "$path" ]; then
+              echo "Removing $path"
+              rm -rf "$path" || failed=1
+            fi
+          done
           rm -rf "$state"
 
           security list-keychains -d user
+          security default-keychain -d user || echo "No default keychain."
           if [ "$failed" -ne 0 ]; then
             echo "::error::Cleanup didn't finish. Check this runner's keychains and profiles."
             exit 1
