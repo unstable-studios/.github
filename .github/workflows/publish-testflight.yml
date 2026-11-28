@@ -417,18 +417,36 @@ jobs:
               sys.exit(1)
 
           # Builds nothing. No -derivedDataPath: xcodebuild rejects it with
-          # -alltargets (usage error 64) unless a scheme is given.
+          # -alltargets (usage error 64) unless a scheme is given. Without
+          # it, though, the call writes a <Project>-<hash> folder under the
+          # account's ~/Library/Developer/Xcode/DerivedData, which outlives
+          # the job on a self-hosted runner. So the default location is
+          # moved into the job's build folder with the user default
+          # -IDECustomDerivedDataLocation, and the package clones the archive
+          # made are reused (no new fetch).
+          derived = os.path.join(temp, "DerivedData")
           result = subprocess.run(
               ["xcodebuild", "-showBuildSettings", "-json",
                "-project", os.environ["PROJECT"], "-alltargets",
-               "-configuration", "Release", "-sdk", "iphoneos"],
+               "-configuration", "Release", "-sdk", "iphoneos",
+               "-clonedSourcePackagesDirPath", os.path.join(derived, "SourcePackages"),
+               f"-IDECustomDerivedDataLocation={derived}"],
               capture_output=True, text=True)
           if result.returncode != 0:
-              print(result.stderr, file=sys.stderr)
+              print("xcodebuild stdout:\n" + result.stdout, file=sys.stderr)
+              print("xcodebuild stderr:\n" + result.stderr, file=sys.stderr)
               fail(f"xcodebuild -showBuildSettings failed with status {result.returncode}.")
           shown = result.stdout
+          if "[" not in shown:
+              print("xcodebuild stdout:\n" + shown, file=sys.stderr)
+              fail("xcodebuild -showBuildSettings printed no JSON.")
+          try:
+              targets = json.loads(shown[shown.index("["):])
+          except ValueError:
+              print("xcodebuild stdout:\n" + shown, file=sys.stderr)
+              fail("xcodebuild -showBuildSettings printed JSON that doesn't parse.")
           settings_by_id = {}
-          for target in json.loads(shown[shown.index("["):]):
+          for target in targets:
               settings = target["buildSettings"]
               settings_by_id.setdefault(settings.get("PRODUCT_BUNDLE_IDENTIFIER", ""), settings)
 
