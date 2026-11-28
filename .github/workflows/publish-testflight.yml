@@ -3,9 +3,12 @@ name: Publish TestFlight
 # Archive an iOS app, sign it for distribution and upload it to App Store
 # Connect, where it shows under TestFlight.
 #
-# Signing is automatic with certificates Apple keeps (cloud signing), so the
-# runner holds no distribution certificate. xcodebuild signs in with an App
-# Store Connect team API key whose role is Admin. The key comes from the
+# The archive is built unsigned (CODE_SIGNING_ALLOWED=NO), so it needs no
+# development certificate. Signing happens once, in xcodebuild -exportArchive
+# with -allowProvisioningUpdates, using the export options' automatic
+# signing. It is automatic with certificates Apple keeps (cloud signing), so
+# the runner holds no distribution certificate. xcodebuild signs in with an
+# App Store Connect team API key whose role is Admin. The key comes from the
 # calling repo's testflight environment, where Doppler syncs it:
 #
 #   vars.ASC_KEY_ID          The key's ID
@@ -72,17 +75,19 @@ name: Publish TestFlight
 # before. On both, the build goes to $RUNNER_TEMP and the key and build
 # are deleted at the end.
 #
-# Signing on a self-hosted runner makes an Apple Development certificate
-# ("Created via API") whose private key is in the job keychain. Once that
-# key is deleted the certificate is useless, and while it exists the next
-# run fails ("Your account already has an Apple Development signing
-# certificate for this machine"). So before the key and the keychain are
-# deleted, and also when an earlier step failed, the job revokes each
-# certificate whose private key is in the job keychain: it reads their
-# serial numbers, lists the account's DEVELOPMENT certificates with the
-# App Store Connect API, and deletes the one with each serial. No other
-# certificate on the account is touched. A failed revocation fails the job
-# and leaves the rest of cleanup to run.
+# Signing with -allowProvisioningUpdates on a self-hosted runner can make an
+# Apple Development certificate ("Created via API") whose private key is in
+# the job keychain. Archiving unsigned is meant to stop that, so the job
+# should make none. If it still does (the export asks for one), the key is
+# useless once deleted, and while the certificate exists the next run fails
+# ("Your account already has an Apple Development signing certificate for
+# this machine"). So before the key and the keychain are deleted, and also
+# when an earlier step failed, the job revokes each certificate whose
+# private key is in the job keychain, as a fallback: it reads their serial
+# numbers, lists the account's DEVELOPMENT certificates with the App Store
+# Connect API, and deletes the one with each serial. No other certificate on
+# the account is touched. A failed revocation fails the job and leaves the
+# rest of cleanup to run.
 
 on:
   workflow_call:
@@ -333,7 +338,7 @@ jobs:
             exit 2
           fi
 
-      - name: Archive, sign and upload
+      - name: Archive unsigned, then sign and upload
         id: archive
         env:
           # Identifiers, not secrets: Doppler syncs unmasked values to
@@ -352,6 +357,8 @@ jobs:
           mkdir -p "$TMPDIR"
           : "${ASC_KEY_ID:?ASC_KEY_ID is not a variable in this environment.}"
           : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is not a variable in this environment.}"
+          # Only the export signs in: the archive isn't signed, so it needs
+          # neither the key nor a development certificate.
           sign_in=(
             -allowProvisioningUpdates
             -authenticationKeyPath "$RUNNER_TEMP/asc-key.p8"
@@ -364,7 +371,8 @@ jobs:
           derived="$RUNNER_TEMP/DerivedData"
 
           # The app and its extensions must carry the same version and
-          # build, so both are set for every target here.
+          # build, so both are set for every target here. Unsigned: signing
+          # happens at export, with the distribution certificate Apple keeps.
           xcodebuild archive \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
@@ -374,9 +382,10 @@ jobs:
             -derivedDataPath "$derived" \
             MARKETING_VERSION="$VERSION" \
             CURRENT_PROJECT_VERSION="$BUILD" \
-            "${sign_in[@]}"
+            CODE_SIGNING_ALLOWED=NO
 
-          # "upload" in the options sends it to App Store Connect.
+          # Signs the app and its extensions, then, with "upload" in the
+          # options, sends it to App Store Connect.
           xcodebuild -exportArchive \
             -archivePath "$archive" \
             -exportOptionsPlist "$EXPORT_OPTIONS" \
@@ -386,20 +395,23 @@ jobs:
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 
       # Self-hosted only, after the upload whether or not it worked, and
-      # before the key and the keychain are deleted. Signing with
-      # -allowProvisioningUpdates makes an Apple Development certificate
-      # ("Created via API") for this Mac, with its private key in the job
-      # keychain. Cleanup deletes that key, and while the certificate
+      # before the key and the keychain are deleted. A fallback: the archive
+      # is unsigned, so the job should make no development certificate. But
+      # signing with -allowProvisioningUpdates can make an Apple Development
+      # certificate ("Created via API") for this Mac, with its private key
+      # in the job keychain, if the export asks for one. Cleanup deletes that key, and while the certificate
       # exists the next run fails ("Your account already has an Apple
       # Development signing certificate for this machine, but its private
       # key is not installed in your keychain"). So this revokes each
       # certificate whose private key is in the job keychain, found on the
       # account by serial number. The keychain is new each job, so every
       # key in it is the job's; certificates without their key there (the
-      # account's others) are never touched. If signing worked but no such
-      # key is in the job keychain (it went to the data protection
-      # keychain, say), the step fails: the certificate would be left
-      # behind. A failure fails the job; the steps after it still run.
+      # account's others) are never touched. With no such key in the job
+      # keychain the step succeeds: that is the expected case. It does not
+      # look for a certificate whose key went elsewhere (the data
+      # protection keychain, say); check the account for a "Created via API"
+      # certificate after a run. A failure fails the job; the steps after
+      # it still run.
       - name: Revoke the job's Apple Development certificate
         if: always() && runner.environment == 'self-hosted'
         timeout-minutes: 5
@@ -407,7 +419,6 @@ jobs:
         env:
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
-          ARCHIVE_OUTCOME: ${{ steps.archive.outcome }}
         run: |
           trap 'echo "::error::Revoking the job'"'"'s Apple Development certificate stopped at line $LINENO. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."' ERR
           keychain="$RUNNER_TEMP/signing.keychain-db"
@@ -459,13 +470,6 @@ jobs:
             fail "The job keychain has $(wc -l < "$work/hashes" | tr -d ' ') Apple Development identities but $(wc -l < "$work/serials" | tr -d ' ') of their certificates were read."
           fi
           if [ ! -s "$work/serials" ]; then
-            # A signed archive needs an Apple Development key. If it isn't
-            # here, it's elsewhere (the data protection keychain, say),
-            # cleanup deletes it, and its certificate is left behind.
-            if [ "$ARCHIVE_OUTCOME" = success ]; then
-              echo "::error::Signing worked, but no Apple Development identity is in the job keychain, so nothing was revoked. Check the account for this run's \"Created via API\" certificate and revoke it in Certificates, Identifiers & Profiles, or the next run fails."
-              exit 1
-            fi
             echo "No Apple Development certificate with its key in the job keychain, so none to revoke."
             exit 0
           fi
