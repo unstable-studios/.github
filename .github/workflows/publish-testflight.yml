@@ -40,8 +40,9 @@ name: Publish TestFlight
 # (selected repos tabstash-apple and rabbithole-apple, workflows limited to
 # unstable-studios/.github/.github/workflows/publish-testflight.yml@refs/heads/main),
 # not its label. The calling repo's own code on the allowed branch still
-# runs there during the archive (build phases, package plugins), with the
-# key on disk.
+# runs there during the archive (build phases, package plugins); the key
+# isn't on disk when the archive runs, but a process that code started can
+# outlive that step.
 #
 # The environment is always testflight, written into the job rather than
 # taken as an input. The runner group limits the workflow and the repos, not
@@ -388,13 +389,16 @@ jobs:
       # An unsigned archive carries no entitlements, and the export signs
       # with the ones it finds on the archived binaries, so an App Group would
       # be dropped without a word and TestFlight processing wouldn't notice.
-      # So this signs the app and each extension ad hoc (no certificate, no
-      # keychain) with its target's entitlements file, children first. Targets
+      # So this signs everything nested in the app ad hoc (no certificate, no
+      # keychain), children first: frameworks and dylibs, each extension, then
+      # the app. codesign needs nested code signed before its container, so
+      # every bundle is signed, with its target's entitlements file where it
+      # has one. Targets
       # come from the scheme's build settings, matched to the archived bundles
       # by bundle identifier; $(VAR) references in the entitlements file are
       # expanded from that target's settings. It then reads the entitlements
-      # back and fails if an application-groups value is missing. Frameworks
-      # and other nested code are left for the export to sign.
+      # back and fails if an application-groups value is missing, or if the
+      # app's own target resolves no entitlements file.
       - name: Put the entitlements on the archive
         env:
           PROJECT: ${{ inputs.project }}
@@ -414,7 +418,7 @@ jobs:
           shown = subprocess.run(
               ["xcodebuild", "-showBuildSettings", "-json",
                "-project", os.environ["PROJECT"], "-scheme", os.environ["SCHEME"],
-               "-configuration", "Release", "-destination", "generic/platform=iOS",
+               "-configuration", "Release", "-sdk", "iphoneos",
                "-derivedDataPath", os.path.join(temp, "DerivedData")],
               check=True, capture_output=True, text=True).stdout
           settings_by_id = {}
@@ -443,9 +447,25 @@ jobs:
           if len(apps) != 1:
               fail(f"Expected one app in the archive, found {len(apps)}.")
           app = apps[0]
-          bundles = sorted(glob.glob(os.path.join(app, "PlugIns", "*.appex"))) + [app]
+          appexes = sorted(glob.glob(os.path.join(app, "PlugIns", "*.appex")))
+          bundles = appexes + [app]
+
+          def nested_code(container):
+              return sorted(glob.glob(os.path.join(container, "Frameworks", "*.framework"))
+                            + glob.glob(os.path.join(container, "Frameworks", "*.dylib")))
+
+          def adhoc(path, entitlements=None):
+              command = ["codesign", "--force", "--sign", "-"]
+              if entitlements:
+                  command += ["--entitlements", entitlements]
+              subprocess.run(command + [path], check=True)
+
           os.makedirs(os.path.join(temp, "entitlements"), exist_ok=True)
           expected = {}
+          # Nested code first, so each container is signed over signed parts.
+          for container in [app] + appexes:
+              for code in nested_code(container):
+                  adhoc(code)
           for bundle in bundles:
               with open(os.path.join(bundle, "Info.plist"), "rb") as f:
                   bundle_id = plistlib.load(f)["CFBundleIdentifier"]
@@ -454,14 +474,17 @@ jobs:
                   fail(f"No target in scheme {os.environ['SCHEME']} has bundle identifier {bundle_id} ({os.path.basename(bundle)}).")
               source = settings.get("CODE_SIGN_ENTITLEMENTS", "")
               if not source:
-                  print(f"{bundle_id}: no entitlements file.")
+                  if bundle == app:
+                      fail(f"The app target ({bundle_id}) resolves no CODE_SIGN_ENTITLEMENTS for the iphoneos SDK, so its entitlements can't be put back.")
+                  print(f"{bundle_id}: no entitlements file; signed ad hoc without.")
+                  adhoc(bundle)
                   continue
               with open(os.path.join(settings["SRCROOT"], source), "rb") as f:
                   entitlements = expand(plistlib.load(f), settings)
               resolved = os.path.join(temp, "entitlements", bundle_id + ".plist")
               with open(resolved, "wb") as f:
                   plistlib.dump(entitlements, f)
-              subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", resolved, bundle], check=True)
+              adhoc(bundle, resolved)
               groups = entitlements.get("com.apple.security.application-groups")
               if groups:
                   expected[bundle_id] = groups
@@ -542,20 +565,20 @@ jobs:
           asc_api() {
             /usr/bin/curl -sS --retry 3 --max-time 60 -o "$4" -w '%{http_code}' -X "$1" -H @"$3" "$2"
           }
-          # asc_dev_certs <out> <work dir>: the account's DEVELOPMENT certificates, one "id<TAB>serial" per line.
+          # asc_dev_certs <out> <work dir>: the account's DEVELOPMENT certificates, one "id<TAB>serial<TAB>name<TAB>expiration" per line.
           # Compared by serial by the caller: filter[serialNumber] doesn't say which format it
           # matches (https://developer.apple.com/documentation/appstoreconnectapi/get-v1-certificates).
           asc_dev_certs() {
             local out=$1 work=$2 url status
             : > "$out"
             asc_auth "$work/auth" || return 1
-            url="$asc_api_base/certificates?filter%5BcertificateType%5D=DEVELOPMENT&fields%5Bcertificates%5D=serialNumber&limit=200"
+            url="$asc_api_base/certificates?filter%5BcertificateType%5D=DEVELOPMENT&fields%5Bcertificates%5D=serialNumber,name,expirationDate&limit=200"
             while [ -n "$url" ]; do
               # The token goes only to Apple's API.
               [[ $url == "$asc_api_base/"* ]] || { echo "::error::The certificate list links to $url, outside the App Store Connect API."; return 1; }
               status=$(asc_api GET "$url" "$work/auth" "$work/response") || { echo "::error::Couldn't list the account's certificates."; return 1; }
               [ "$status" = 200 ] || { echo "::error::Listing the account's certificates returned HTTP $status."; return 1; }
-              /usr/bin/jq -r '.data[] | [.id, .attributes.serialNumber] | @tsv' "$work/response" >> "$out" || return 1
+              /usr/bin/jq -r '.data[] | [.id, .attributes.serialNumber, .attributes.name, .attributes.expirationDate] | @tsv' "$work/response" >> "$out" || return 1
               url=$(/usr/bin/jq -r '.links.next // empty' "$work/response")
             done
           }
@@ -565,6 +588,7 @@ jobs:
       # compare with after. The revoke step reads this: a new one means the
       # export made it.
       - name: Record the account's development certificates
+        if: runner.environment == 'self-hosted'
         shell: bash
         env:
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
@@ -765,7 +789,7 @@ jobs:
           failed=0
           while IFS=$'\t' read -r serial subject; do
             ids=()
-            while IFS=$'\t' read -r id account_serial; do
+            while IFS=$'\t' read -r id account_serial _; do
               if [ "$(normalize "$account_serial")" = "$serial" ]; then ids+=("$id"); fi
             done < "$work/account"
             if [ "${#ids[@]}" -ne 1 ]; then
@@ -799,7 +823,7 @@ jobs:
             cut -f1 "$work/account" | sort | comm -23 - "$snapshot" | comm -23 - "$work/revoked.sorted" > "$work/new"
             if [ -s "$work/new" ]; then
               while IFS= read -r id; do
-                echo "::error::Apple Development certificate $id (serial $(awk -F'\t' -v id="$id" '$1 == id { print $2 }' "$work/account")) appeared on the account during this run, and its key isn't in the job keychain, so it wasn't revoked. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+                echo "::error::New Apple Development certificate $(awk -F'\t' -v id="$id" '$1 == id { printf "%s, serial %s, expires %s", $3, $2, $4 }' "$work/account") (id $id) appeared on the account during this run, and its key isn't in the job keychain, so it wasn't revoked. It may not be this job's (a development certificate is valid for a year, so the expiration date shows when it was made). If it is, revoke it in Certificates, Identifiers & Profiles, or the next run fails."
               done < "$work/new"
               failed=1
             else
