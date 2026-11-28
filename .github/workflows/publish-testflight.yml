@@ -4,11 +4,19 @@ name: Publish TestFlight
 # Connect, where it shows under TestFlight.
 #
 # The archive is built unsigned (CODE_SIGNING_ALLOWED=NO), so it needs no
-# development certificate. Signing happens once, in xcodebuild -exportArchive
-# with -allowProvisioningUpdates, using the export options' automatic
-# signing. It is automatic with certificates Apple keeps (cloud signing), so
+# development certificate and no key. Xcode embeds entitlements only when it
+# signs, so the job then signs the app and its extensions ad hoc with their
+# entitlements files and checks the App Groups are on them. Signing for
+# distribution happens in xcodebuild -exportArchive with
+# -allowProvisioningUpdates, using the export options' automatic signing,
+# which must carry the teamID (the archive records no team). The export runs
+# twice from the same archive: first to a folder, where the job reads the
+# signed binaries' entitlements and fails if an App Group is missing, then
+# with the options' upload, so nothing unchecked reaches App Store Connect.
+# Signing is automatic with certificates Apple keeps (cloud signing), so
 # the runner holds no distribution certificate. xcodebuild signs in with an
-# App Store Connect team API key whose role is Admin. The key comes from the
+# App Store Connect team API key whose role is Admin, written to disk only
+# after the archive, for the export. The key comes from the
 # calling repo's testflight environment, where Doppler syncs it:
 #
 #   vars.ASC_KEY_ID          The key's ID
@@ -81,13 +89,14 @@ name: Publish TestFlight
 # should make none. If it still does (the export asks for one), the key is
 # useless once deleted, and while the certificate exists the next run fails
 # ("Your account already has an Apple Development signing certificate for
-# this machine"). So before the key and the keychain are deleted, and also
-# when an earlier step failed, the job revokes each certificate whose
+# this machine"). So the job lists the account's DEVELOPMENT certificates
+# before the export, and before the key and the keychain are deleted, and
+# also when an earlier step failed, it revokes each certificate whose
 # private key is in the job keychain, as a fallback: it reads their serial
-# numbers, lists the account's DEVELOPMENT certificates with the App Store
-# Connect API, and deletes the one with each serial. No other certificate on
-# the account is touched. A failed revocation fails the job and leaves the
-# rest of cleanup to run.
+# numbers and deletes the account's certificate with each serial. No other
+# certificate on the account is touched. A certificate that is new since the
+# first list and wasn't revoked fails the job with its id. A failed
+# revocation fails the job and leaves the rest of cleanup to run.
 
 on:
   workflow_call:
@@ -117,7 +126,7 @@ on:
         type: string
         default: ""
       export-options:
-        description: "Path to the export options plist (method app-store-connect, destination upload)"
+        description: "Path to the export options plist (method app-store-connect, destination upload, and teamID: the unsigned archive records no team, so the export takes it from here)"
         type: string
         default: "Config/TestFlight-ExportOptions.plist"
       runs-on:
@@ -278,6 +287,22 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
 
+      # Before the key is written: the unsigned archive records no team, so
+      # the export signs with the teamID in the export options.
+      - name: Check the export options
+        env:
+          EXPORT_OPTIONS: ${{ inputs.export-options }}
+        run: |
+          if [ ! -f "$EXPORT_OPTIONS" ]; then
+            echo "::error::There is no export options plist at $EXPORT_OPTIONS."
+            exit 2
+          fi
+          team=$(/usr/libexec/PlistBuddy -c 'Print :teamID' "$EXPORT_OPTIONS" 2>/dev/null || true)
+          if [ -z "$team" ]; then
+            echo "::error::$EXPORT_OPTIONS has no teamID. The archive is unsigned, so the export needs the team there (add <key>teamID</key><string>YOUR_TEAM_ID</string>)."
+            exit 2
+          fi
+
       # Self-hosted only: a keychain for this job, and the only one
       # xcodebuild sees, so anything signing creates (an Apple Development
       # key, for one) goes there and is deleted with it. The account's own
@@ -324,6 +349,141 @@ jobs:
           security default-keychain -d user -s "$keychain"
           security list-keychains -d user
 
+      # Archive first, with no key on disk: the archive is unsigned, so
+      # build phases and package plugins of the caller's code that run during
+      # it have nothing to read. The key is written only for the export.
+      - name: Archive unsigned
+        id: archive
+        env:
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+          VERSION: ${{ steps.plan.outputs.version }}
+          BUILD: ${{ steps.plan.outputs.build }}
+          # Distribution logs and export staging, which would otherwise
+          # stay in the account's temporary folder.
+          TMPDIR: ${{ runner.temp }}/tmp
+        run: |
+          mkdir -p "$TMPDIR"
+          archive="$RUNNER_TEMP/app.xcarchive"
+          # Not ~/Library/Developer/Xcode/DerivedData, which outlives the job
+          # on the pool.
+          derived="$RUNNER_TEMP/DerivedData"
+
+          # The app and its extensions must carry the same version and
+          # build, so both are set for every target here. Unsigned: signing
+          # happens at export, with the distribution certificate Apple keeps.
+          # Xcode embeds entitlements only when it signs, so the next step
+          # puts them back.
+          xcodebuild archive \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -destination "generic/platform=iOS" \
+            -archivePath "$archive" \
+            -derivedDataPath "$derived" \
+            MARKETING_VERSION="$VERSION" \
+            CURRENT_PROJECT_VERSION="$BUILD" \
+            CODE_SIGNING_ALLOWED=NO
+
+      # An unsigned archive carries no entitlements, and the export signs
+      # with the ones it finds on the archived binaries, so an App Group would
+      # be dropped without a word and TestFlight processing wouldn't notice.
+      # So this signs the app and each extension ad hoc (no certificate, no
+      # keychain) with its target's entitlements file, children first. Targets
+      # come from the scheme's build settings, matched to the archived bundles
+      # by bundle identifier; $(VAR) references in the entitlements file are
+      # expanded from that target's settings. It then reads the entitlements
+      # back and fails if an application-groups value is missing. Frameworks
+      # and other nested code are left for the export to sign.
+      - name: Put the entitlements on the archive
+        env:
+          PROJECT: ${{ inputs.project }}
+          SCHEME: ${{ inputs.scheme }}
+        shell: bash
+        run: |
+          /usr/bin/python3 - <<'PY'
+          import glob, json, os, plistlib, re, subprocess, sys
+
+          temp = os.environ["RUNNER_TEMP"]
+          archive = os.path.join(temp, "app.xcarchive")
+
+          def fail(message):
+              print(f"::error::{message}")
+              sys.exit(1)
+
+          shown = subprocess.run(
+              ["xcodebuild", "-showBuildSettings", "-json",
+               "-project", os.environ["PROJECT"], "-scheme", os.environ["SCHEME"],
+               "-configuration", "Release", "-destination", "generic/platform=iOS",
+               "-derivedDataPath", os.path.join(temp, "DerivedData")],
+              check=True, capture_output=True, text=True).stdout
+          settings_by_id = {}
+          for target in json.loads(shown[shown.index("["):]):
+              settings = target["buildSettings"]
+              settings_by_id.setdefault(settings.get("PRODUCT_BUNDLE_IDENTIFIER", ""), settings)
+
+          def expand(value, settings):
+              if isinstance(value, str):
+                  for _ in range(10):
+                      new = re.sub(r"\$[({]([A-Za-z_][A-Za-z0-9_]*)[)}]",
+                                   lambda m: settings.get(m.group(1), m.group(0)), value)
+                      if new == value:
+                          break
+                      value = new
+                  if "$(" in value or "${" in value:
+                      fail(f"Can't expand {value!r} from the target's build settings.")
+                  return value
+              if isinstance(value, list):
+                  return [expand(v, settings) for v in value]
+              if isinstance(value, dict):
+                  return {k: expand(v, settings) for k, v in value.items()}
+              return value
+
+          apps = glob.glob(os.path.join(archive, "Products", "Applications", "*.app"))
+          if len(apps) != 1:
+              fail(f"Expected one app in the archive, found {len(apps)}.")
+          app = apps[0]
+          bundles = sorted(glob.glob(os.path.join(app, "PlugIns", "*.appex"))) + [app]
+          os.makedirs(os.path.join(temp, "entitlements"), exist_ok=True)
+          expected = {}
+          for bundle in bundles:
+              with open(os.path.join(bundle, "Info.plist"), "rb") as f:
+                  bundle_id = plistlib.load(f)["CFBundleIdentifier"]
+              settings = settings_by_id.get(bundle_id)
+              if settings is None:
+                  fail(f"No target in scheme {os.environ['SCHEME']} has bundle identifier {bundle_id} ({os.path.basename(bundle)}).")
+              source = settings.get("CODE_SIGN_ENTITLEMENTS", "")
+              if not source:
+                  print(f"{bundle_id}: no entitlements file.")
+                  continue
+              with open(os.path.join(settings["SRCROOT"], source), "rb") as f:
+                  entitlements = expand(plistlib.load(f), settings)
+              resolved = os.path.join(temp, "entitlements", bundle_id + ".plist")
+              with open(resolved, "wb") as f:
+                  plistlib.dump(entitlements, f)
+              subprocess.run(["codesign", "--force", "--sign", "-", "--entitlements", resolved, bundle], check=True)
+              groups = entitlements.get("com.apple.security.application-groups")
+              if groups:
+                  expected[bundle_id] = groups
+              print(f"{bundle_id}: signed ad hoc with {source}; application-groups {groups}.")
+          # Read back what is on the archived binaries.
+          for bundle in bundles:
+              with open(os.path.join(bundle, "Info.plist"), "rb") as f:
+                  bundle_id = plistlib.load(f)["CFBundleIdentifier"]
+              if bundle_id not in expected:
+                  continue
+              out = subprocess.run(["codesign", "-d", "--entitlements", ":-", bundle],
+                                   check=True, capture_output=True).stdout
+              found = plistlib.loads(out).get("com.apple.security.application-groups", [])
+              missing = [g for g in expected[bundle_id] if g not in found]
+              if missing:
+                  fail(f"{bundle_id} lost application-groups {missing} after signing.")
+          with open(os.path.join(temp, "expected-groups.json"), "w") as f:
+              json.dump(expected, f)
+          PY
+
+      # Only now: the archive and the entitlements step run with no key on
+      # disk.
       - name: Write the App Store Connect key
         env:
           ASC_KEY_P8: ${{ secrets.ASC_KEY_P8 }}
@@ -338,27 +498,109 @@ jobs:
             exit 2
           fi
 
-      - name: Archive unsigned, then sign and upload
-        id: archive
+      # Shared by the steps that call the App Store Connect API: the token,
+      # an ES256 JWT that expires in 10 minutes
+      # (https://developer.apple.com/documentation/appstoreconnectapi/generating-tokens-for-api-requests).
+      # openssl signs in DER, SEQUENCE { INTEGER r, INTEGER s }; a JWS
+      # ES256 signature is r and s as 32 bytes each, big-endian
+      # (RFC 7518, 3.4). The token goes only to Apple's API, is masked and is
+      # never printed.
+      - name: Write the App Store Connect API helper
+        shell: bash
+        run: |
+          cat > "$RUNNER_TEMP/asc-api.sh" <<'HELPER'
+          # Sourced. Needs ASC_KEY_ID and ASC_ISSUER_ID, and the key at $RUNNER_TEMP/asc-key.p8.
+          asc_api_base="https://api.appstoreconnect.apple.com/v1"
+          asc_b64url() { /usr/bin/openssl base64 -A | tr '+/' '-_' | tr -d '='; }
+          # asc_auth <file>: writes an Authorization header file with a fresh token.
+          asc_auth() {
+            local out=$1 key="$RUNNER_TEMP/asc-key.p8" now header payload raw int jwt dir
+            [ -n "${ASC_KEY_ID:-}" ] && [ -n "${ASC_ISSUER_ID:-}" ] || { echo "::error::ASC_KEY_ID or ASC_ISSUER_ID is not a variable in this environment."; return 1; }
+            [ -s "$key" ] || { echo "::error::The App Store Connect key isn't at $key."; return 1; }
+            dir=$(mktemp -d "$RUNNER_TEMP/jwt.XXXXXX") || return 1
+            now=$(date +%s)
+            header=$(/usr/bin/jq -cjn --arg kid "$ASC_KEY_ID" '{alg: "ES256", kid: $kid, typ: "JWT"}' | asc_b64url)
+            payload=$(/usr/bin/jq -cjn --arg iss "$ASC_ISSUER_ID" --argjson iat "$now" --argjson exp "$((now + 600))" \
+              '{iss: $iss, iat: $iat, exp: $exp, aud: "appstoreconnect-v1"}' | asc_b64url)
+            printf '%s' "$header.$payload" | /usr/bin/openssl dgst -sha256 -sign "$key" -out "$dir/sig.der" \
+              && /usr/bin/openssl asn1parse -inform DER -in "$dir/sig.der" > "$dir/sig.txt" \
+              || { rm -rf "$dir"; echo "::error::Couldn't sign the App Store Connect token."; return 1; }
+            raw=""
+            while IFS= read -r int; do
+              int=$(printf '%s' "$int" | sed 's/^0*//')
+              [[ $int =~ ^[0-9A-Fa-f]{0,64}$ ]] || { rm -rf "$dir"; echo "::error::The token's signature isn't an ES256 signature."; return 1; }
+              raw+=$(printf '%64s' "$int" | tr ' ' 0)
+            done < <(awk -F: '/prim: *INTEGER/ { print $NF }' "$dir/sig.txt")
+            rm -rf "$dir"
+            [ "${#raw}" -eq 128 ] || { echo "::error::The token's signature isn't an ES256 signature."; return 1; }
+            jwt="$header.$payload.$(printf '%s' "$raw" | /usr/bin/xxd -r -p | asc_b64url)"
+            echo "::add-mask::$jwt"
+            # In a file, not on curl's command line, where ps would show it.
+            ( umask 077; printf 'Authorization: Bearer %s\n' "$jwt" > "$out" )
+          }
+          # asc_api <method> <url> <header file> <response file>: prints the HTTP status.
+          asc_api() {
+            /usr/bin/curl -sS --retry 3 --max-time 60 -o "$4" -w '%{http_code}' -X "$1" -H @"$3" "$2"
+          }
+          # asc_dev_certs <out> <work dir>: the account's DEVELOPMENT certificates, one "id<TAB>serial" per line.
+          # Compared by serial by the caller: filter[serialNumber] doesn't say which format it
+          # matches (https://developer.apple.com/documentation/appstoreconnectapi/get-v1-certificates).
+          asc_dev_certs() {
+            local out=$1 work=$2 url status
+            : > "$out"
+            asc_auth "$work/auth" || return 1
+            url="$asc_api_base/certificates?filter%5BcertificateType%5D=DEVELOPMENT&fields%5Bcertificates%5D=serialNumber&limit=200"
+            while [ -n "$url" ]; do
+              # The token goes only to Apple's API.
+              [[ $url == "$asc_api_base/"* ]] || { echo "::error::The certificate list links to $url, outside the App Store Connect API."; return 1; }
+              status=$(asc_api GET "$url" "$work/auth" "$work/response") || { echo "::error::Couldn't list the account's certificates."; return 1; }
+              [ "$status" = 200 ] || { echo "::error::Listing the account's certificates returned HTTP $status."; return 1; }
+              /usr/bin/jq -r '.data[] | [.id, .attributes.serialNumber] | @tsv' "$work/response" >> "$out" || return 1
+              url=$(/usr/bin/jq -r '.links.next // empty' "$work/response")
+            done
+          }
+          HELPER
+
+      # The account's Apple Development certificates before the export, to
+      # compare with after. The revoke step reads this: a new one means the
+      # export made it.
+      - name: Record the account's development certificates
+        shell: bash
         env:
-          # Identifiers, not secrets: Doppler syncs unmasked values to
-          # GitHub as variables. They show in this job's log.
           ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
           ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
-          PROJECT: ${{ inputs.project }}
+        run: |
+          umask 077
+          # shellcheck disable=SC1091
+          source "$RUNNER_TEMP/asc-api.sh"
+          dir="$RUNNER_TEMP/certs"
+          mkdir -p "$dir"
+          work=$(mktemp -d "$RUNNER_TEMP/certs.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          asc_dev_certs "$work/before" "$work" || exit 1
+          # Last: the revoke step compares only when this file exists.
+          cut -f1 "$work/before" | sort > "$dir/before-ids.new"
+          mv "$dir/before-ids.new" "$dir/before-ids"
+          echo "$(wc -l < "$dir/before-ids" | tr -d ' ') Apple Development certificates on the account before the export."
+
+      # Signs, so the key is needed. Exported twice from the same archive:
+      # first to a folder, to read the signed binaries' entitlements before
+      # anything reaches App Store Connect, then with the caller's options
+      # ("upload" in them sends it).
+      - name: Export, check the entitlements and upload
+        id: export
+        env:
+          ASC_KEY_ID: ${{ vars.ASC_KEY_ID }}
+          ASC_ISSUER_ID: ${{ vars.ASC_ISSUER_ID }}
           SCHEME: ${{ inputs.scheme }}
           EXPORT_OPTIONS: ${{ inputs.export-options }}
           VERSION: ${{ steps.plan.outputs.version }}
           BUILD: ${{ steps.plan.outputs.build }}
-          # Distribution logs and export staging, which would otherwise
-          # stay in the account's temporary folder.
           TMPDIR: ${{ runner.temp }}/tmp
         run: |
           mkdir -p "$TMPDIR"
           : "${ASC_KEY_ID:?ASC_KEY_ID is not a variable in this environment.}"
           : "${ASC_ISSUER_ID:?ASC_ISSUER_ID is not a variable in this environment.}"
-          # Only the export signs in: the archive isn't signed, so it needs
-          # neither the key nor a development certificate.
           sign_in=(
             -allowProvisioningUpdates
             -authenticationKeyPath "$RUNNER_TEMP/asc-key.p8"
@@ -366,26 +608,63 @@ jobs:
             -authenticationKeyIssuerID "$ASC_ISSUER_ID"
           )
           archive="$RUNNER_TEMP/app.xcarchive"
-          # Not ~/Library/Developer/Xcode/DerivedData, which outlives the job
-          # on the pool.
-          derived="$RUNNER_TEMP/DerivedData"
 
-          # The app and its extensions must carry the same version and
-          # build, so both are set for every target here. Unsigned: signing
-          # happens at export, with the distribution certificate Apple keeps.
-          xcodebuild archive \
-            -project "$PROJECT" \
-            -scheme "$SCHEME" \
-            -configuration Release \
-            -destination "generic/platform=iOS" \
+          # The caller's options with destination export: the signed .ipa
+          # lands in a folder here and goes nowhere.
+          local_options="$RUNNER_TEMP/export-options-local.plist"
+          cp "$EXPORT_OPTIONS" "$local_options"
+          /usr/libexec/PlistBuddy -c "Set :destination export" "$local_options" 2>/dev/null \
+            || /usr/libexec/PlistBuddy -c "Add :destination string export" "$local_options"
+          xcodebuild -exportArchive \
             -archivePath "$archive" \
-            -derivedDataPath "$derived" \
-            MARKETING_VERSION="$VERSION" \
-            CURRENT_PROJECT_VERSION="$BUILD" \
-            CODE_SIGNING_ALLOWED=NO
+            -exportOptionsPlist "$local_options" \
+            -exportPath "$RUNNER_TEMP/export-check" \
+            "${sign_in[@]}"
 
-          # Signs the app and its extensions, then, with "upload" in the
-          # options, sends it to App Store Connect.
+          # Read the entitlements of the signed binaries in the .ipa.
+          shopt -s nullglob
+          ipas=("$RUNNER_TEMP"/export-check/*.ipa)
+          if [ "${#ipas[@]}" -ne 1 ]; then
+            echo "::error::Expected one .ipa in the export, found ${#ipas[@]}."
+            exit 1
+          fi
+          unpacked="$RUNNER_TEMP/export-check/unpacked"
+          ditto -x -k "${ipas[0]}" "$unpacked"
+          IPA_APP=$(echo "$unpacked"/Payload/*.app) /usr/bin/python3 - <<'PY'
+          import glob, json, os, plistlib, subprocess, sys
+
+          expected = json.load(open(os.path.join(os.environ["RUNNER_TEMP"], "expected-groups.json")))
+          app = os.environ["IPA_APP"]
+          problems = []
+          for bundle in sorted(glob.glob(os.path.join(app, "PlugIns", "*.appex"))) + [app]:
+              with open(os.path.join(bundle, "Info.plist"), "rb") as f:
+                  bundle_id = plistlib.load(f)["CFBundleIdentifier"]
+              if bundle_id not in expected:
+                  continue
+              out = subprocess.run(["codesign", "-d", "--entitlements", ":-", bundle],
+                                   capture_output=True).stdout
+              try:
+                  found = plistlib.loads(out).get("com.apple.security.application-groups", [])
+              except Exception:
+                  found = []
+              for group in expected[bundle_id]:
+                  if group not in found:
+                      problems.append(f"{bundle_id} has no application group {group} in the exported build.")
+              print(f"{bundle_id}: exported application-groups {found}.")
+          seen = set()
+          for bundle in glob.glob(os.path.join(app, "PlugIns", "*.appex")) + [app]:
+              with open(os.path.join(bundle, "Info.plist"), "rb") as f:
+                  seen.add(plistlib.load(f)["CFBundleIdentifier"])
+          for bundle_id in expected:
+              if bundle_id not in seen:
+                  problems.append(f"{bundle_id} isn't in the exported build.")
+          for problem in problems:
+              print(f"::error::{problem}")
+          sys.exit(1 if problems else 0)
+          PY
+
+          # The same archive and options, with "upload": signs again and
+          # sends it to App Store Connect.
           xcodebuild -exportArchive \
             -archivePath "$archive" \
             -exportOptionsPlist "$EXPORT_OPTIONS" \
@@ -395,23 +674,26 @@ jobs:
           echo "Uploaded $SCHEME $VERSION ($BUILD) to App Store Connect." >> "$GITHUB_STEP_SUMMARY"
 
       # Self-hosted only, after the upload whether or not it worked, and
-      # before the key and the keychain are deleted. A fallback: the archive
-      # is unsigned, so the job should make no development certificate. But
-      # signing with -allowProvisioningUpdates can make an Apple Development
-      # certificate ("Created via API") for this Mac, with its private key
-      # in the job keychain, if the export asks for one. Cleanup deletes that key, and while the certificate
-      # exists the next run fails ("Your account already has an Apple
-      # Development signing certificate for this machine, but its private
-      # key is not installed in your keychain"). So this revokes each
-      # certificate whose private key is in the job keychain, found on the
-      # account by serial number. The keychain is new each job, so every
-      # key in it is the job's; certificates without their key there (the
-      # account's others) are never touched. With no such key in the job
-      # keychain the step succeeds: that is the expected case. It does not
-      # look for a certificate whose key went elsewhere (the data
-      # protection keychain, say); check the account for a "Created via API"
-      # certificate after a run. A failure fails the job; the steps after
-      # it still run.
+      # before the key and the keychain are deleted. The archive is unsigned,
+      # so the job should make no development certificate. But signing with
+      # -allowProvisioningUpdates can make an Apple Development certificate
+      # ("Created via API") for this Mac, with its private key in the job
+      # keychain, if the export asks for one. Cleanup deletes that key, and
+      # while the certificate exists the next run fails ("Your account
+      # already has an Apple Development signing certificate for this
+      # machine, but its private key is not installed in your keychain"). So
+      # this revokes each certificate whose private key is in the job
+      # keychain, found on the account by serial number. The keychain is new
+      # each job, so every key in it is the job's; certificates without their
+      # key there (the account's others) are never touched.
+      #
+      # It also compares the account's development certificates with the
+      # list taken before the export. One that is new and wasn't revoked
+      # (its key went elsewhere, the data protection keychain, say) fails the
+      # job with its id, since it would be left behind; it is not revoked
+      # here, because nothing shows it is the job's. With no certificate
+      # made, the step succeeds. A failure fails the job; the steps after it
+      # still run.
       - name: Revoke the job's Apple Development certificate
         if: always() && runner.environment == 'self-hosted'
         timeout-minutes: 5
@@ -422,7 +704,6 @@ jobs:
         run: |
           trap 'echo "::error::Revoking the job'"'"'s Apple Development certificate stopped at line $LINENO. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."' ERR
           keychain="$RUNNER_TEMP/signing.keychain-db"
-          key="$RUNNER_TEMP/asc-key.p8"
           if [ ! -e "$keychain" ]; then
             echo "No job keychain, so no certificate to revoke."
             exit 0
@@ -463,69 +744,24 @@ jobs:
           done
 
           fail() {
-            echo "::error::$1 The job's Apple Development certificate (serial $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')) wasn't revoked. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+            echo "::error::$1 Check the account for a \"Created via API\" Apple Development certificate from this run (serials of the job's: $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')) and revoke it in Certificates, Identifiers & Profiles, or the next run fails."
             exit 1
           }
           if [ "$(wc -l < "$work/serials")" -ne "$(wc -l < "$work/hashes")" ]; then
             fail "The job keychain has $(wc -l < "$work/hashes" | tr -d ' ') Apple Development identities but $(wc -l < "$work/serials" | tr -d ' ') of their certificates were read."
           fi
-          if [ ! -s "$work/serials" ]; then
+          snapshot="$RUNNER_TEMP/certs/before-ids"
+          if [ ! -s "$work/serials" ] && [ ! -f "$snapshot" ]; then
             echo "No Apple Development certificate with its key in the job keychain, so none to revoke."
             exit 0
           fi
-          echo "To revoke, by serial: $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')"
-          [ -n "$ASC_KEY_ID" ] && [ -n "$ASC_ISSUER_ID" ] || fail "ASC_KEY_ID or ASC_ISSUER_ID is not a variable in this environment."
-          [ -s "$key" ] || fail "The App Store Connect key isn't at $key."
+          if [ -s "$work/serials" ]; then
+            echo "To revoke, by serial: $(cut -f1 "$work/serials" | tr '\n' ' ' | sed 's/ $//')"
+          fi
+          source "$RUNNER_TEMP/asc-api.sh"
+          asc_dev_certs "$work/account" "$work" || fail "Couldn't list the account's certificates."
 
-          # The App Store Connect token: an ES256 JWT that expires in 10
-          # minutes (https://developer.apple.com/documentation/appstoreconnectapi/generating-tokens-for-api-requests).
-          # openssl signs in DER, SEQUENCE { INTEGER r, INTEGER s }; a JWS
-          # ES256 signature is r and s as 32 bytes each, big-endian
-          # (RFC 7518, 3.4).
-          b64url() { /usr/bin/openssl base64 -A | tr '+/' '-_' | tr -d '='; }
-          now=$(date +%s)
-          header=$(/usr/bin/jq -cjn --arg kid "$ASC_KEY_ID" '{alg: "ES256", kid: $kid, typ: "JWT"}' | b64url)
-          payload=$(/usr/bin/jq -cjn --arg iss "$ASC_ISSUER_ID" --argjson iat "$now" --argjson exp "$((now + 600))" \
-            '{iss: $iss, iat: $iat, exp: $exp, aud: "appstoreconnect-v1"}' | b64url)
-          printf '%s' "$header.$payload" | /usr/bin/openssl dgst -sha256 -sign "$key" -out "$work/sig.der" \
-            || fail "Couldn't sign the App Store Connect token."
-          /usr/bin/openssl asn1parse -inform DER -in "$work/sig.der" > "$work/sig.txt" \
-            || fail "Couldn't read the token's signature."
-          raw=""
-          while IFS= read -r int; do
-            int=$(printf '%s' "$int" | sed 's/^0*//')
-            [[ $int =~ ^[0-9A-Fa-f]{0,64}$ ]] || fail "The token's signature isn't an ES256 signature."
-            raw+=$(printf '%64s' "$int" | tr ' ' 0)
-          done < <(awk -F: '/prim: *INTEGER/ { print $NF }' "$work/sig.txt")
-          [ "${#raw}" -eq 128 ] || fail "The token's signature isn't an ES256 signature."
-          jwt="$header.$payload.$(printf '%s' "$raw" | /usr/bin/xxd -r -p | b64url)"
-          echo "::add-mask::$jwt"
-          # In a file, not on curl's command line, where ps would show it.
-          printf 'Authorization: Bearer %s\n' "$jwt" > "$work/auth"
-          unset jwt
-
-          api_base="https://api.appstoreconnect.apple.com/v1"
-          api() {
-            /usr/bin/curl -sS --retry 3 --max-time 60 -o "$work/response" -w '%{http_code}' \
-              -X "$1" -H @"$work/auth" "$2"
-          }
-          api_errors() { /usr/bin/jq -r '[.errors[]? | .detail // .title] | join(" ")' "$work/response" 2>/dev/null || true; }
-
-          # The account's Apple Development certificates, compared by
-          # serial here: filter[serialNumber] doesn't say which format it
-          # matches (https://developer.apple.com/documentation/appstoreconnectapi/get-v1-certificates).
-          : > "$work/account"
-          url="$api_base/certificates?filter%5BcertificateType%5D=DEVELOPMENT&fields%5Bcertificates%5D=serialNumber&limit=200"
-          while [ -n "$url" ]; do
-            # The token goes only to Apple's API.
-            [[ $url == "$api_base/"* ]] || fail "The certificate list links to $url, outside the App Store Connect API."
-            status=$(api GET "$url") || fail "Couldn't list the account's certificates."
-            [ "$status" = 200 ] || fail "Listing the account's certificates returned HTTP $status. $(api_errors)"
-            /usr/bin/jq -r '.data[] | [.id, .attributes.serialNumber] | @tsv' "$work/response" >> "$work/account" \
-              || fail "Couldn't read the account's certificates."
-            url=$(/usr/bin/jq -r '.links.next // empty' "$work/response")
-          done
-
+          : > "$work/revoked"
           failed=0
           while IFS=$'\t' read -r serial subject; do
             ids=()
@@ -544,23 +780,37 @@ jobs:
               continue
             fi
             # https://developer.apple.com/documentation/appstoreconnectapi/delete-v1-certificates-_id_
-            status=$(api DELETE "$api_base/certificates/$id") || status="no response"
+            status=$(asc_api DELETE "$asc_api_base/certificates/$id" "$work/auth" "$work/response") || status="no response"
             case "$status" in
-              204) echo "Revoked $subject (serial $serial, id $id)." ;;
+              204) echo "Revoked $subject (serial $serial, id $id)."; echo "$id" >> "$work/revoked" ;;
               # Listed moments ago, so most likely a retry after a
               # revocation whose answer was lost.
-              404) echo "$subject (serial $serial, id $id) wasn't found, so it's most likely revoked already." ;;
+              404) echo "$subject (serial $serial, id $id) wasn't found, so it's most likely revoked already."; echo "$id" >> "$work/revoked" ;;
               *)
-                echo "::error::Revoking $subject (serial $serial, id $id) returned HTTP $status. $(api_errors) Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+                echo "::error::Revoking $subject (serial $serial, id $id) returned HTTP $status. $(/usr/bin/jq -r '[.errors[]? | .detail // .title] | join(" ")' "$work/response" 2>/dev/null || true) Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
                 failed=1
                 ;;
             esac
           done < "$work/serials"
+
+          # Certificates that appeared during the job and weren't revoked above.
+          if [ -f "$snapshot" ]; then
+            sort "$work/revoked" > "$work/revoked.sorted"
+            cut -f1 "$work/account" | sort | comm -23 - "$snapshot" | comm -23 - "$work/revoked.sorted" > "$work/new"
+            if [ -s "$work/new" ]; then
+              while IFS= read -r id; do
+                echo "::error::Apple Development certificate $id (serial $(awk -F'\t' -v id="$id" '$1 == id { print $2 }' "$work/account")) appeared on the account during this run, and its key isn't in the job keychain, so it wasn't revoked. Revoke it in Certificates, Identifiers & Profiles, or the next run fails."
+              done < "$work/new"
+              failed=1
+            else
+              echo "No Apple Development certificate was left behind."
+            fi
+          fi
           exit "$failed"
 
       - name: Remove the key and the build
         if: always()
-        run: rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/DerivedData" "$RUNNER_TEMP/tmp"
+        run: rm -rf "$RUNNER_TEMP/asc-key.p8" "$RUNNER_TEMP/asc-api.sh" "$RUNNER_TEMP/app.xcarchive" "$RUNNER_TEMP/export" "$RUNNER_TEMP/export-check" "$RUNNER_TEMP/export-options-local.plist" "$RUNNER_TEMP/entitlements" "$RUNNER_TEMP/expected-groups.json" "$RUNNER_TEMP/certs" "$RUNNER_TEMP"/certs.* "$RUNNER_TEMP"/jwt.* "$RUNNER_TEMP/DerivedData" "$RUNNER_TEMP/tmp"
 
       - name: Remove the keychain and restore the account's
         if: always() && runner.environment == 'self-hosted'
