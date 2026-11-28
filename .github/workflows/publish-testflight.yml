@@ -394,7 +394,9 @@ jobs:
       # the app. codesign needs nested code signed before its container, so
       # every bundle is signed, with its target's entitlements file where it
       # has one. Targets
-      # come from the scheme's build settings, matched to the archived bundles
+      # come from the project's build settings for every target (the scheme's
+      # lists only the app target, not its embedded extensions), in the
+      # archive's configuration, matched to the archived bundles
       # by bundle identifier; $(VAR) references in the entitlements file are
       # expanded from that target's settings. It then reads the entitlements
       # back and fails if an application-groups value is missing, or if the
@@ -402,7 +404,6 @@ jobs:
       - name: Put the entitlements on the archive
         env:
           PROJECT: ${{ inputs.project }}
-          SCHEME: ${{ inputs.scheme }}
         shell: bash
         run: |
           /usr/bin/python3 - <<'PY'
@@ -417,7 +418,7 @@ jobs:
 
           shown = subprocess.run(
               ["xcodebuild", "-showBuildSettings", "-json",
-               "-project", os.environ["PROJECT"], "-scheme", os.environ["SCHEME"],
+               "-project", os.environ["PROJECT"], "-alltargets",
                "-configuration", "Release", "-sdk", "iphoneos",
                "-derivedDataPath", os.path.join(temp, "DerivedData")],
               check=True, capture_output=True, text=True).stdout
@@ -471,7 +472,7 @@ jobs:
                   bundle_id = plistlib.load(f)["CFBundleIdentifier"]
               settings = settings_by_id.get(bundle_id)
               if settings is None:
-                  fail(f"No target in scheme {os.environ['SCHEME']} has bundle identifier {bundle_id} ({os.path.basename(bundle)}).")
+                  fail(f"No target in {os.environ['PROJECT']} has bundle identifier {bundle_id} ({os.path.basename(bundle)}).")
               source = settings.get("CODE_SIGN_ENTITLEMENTS", "")
               if not source:
                   if bundle == app:
