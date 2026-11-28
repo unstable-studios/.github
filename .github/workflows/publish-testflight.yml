@@ -416,12 +416,17 @@ jobs:
               print(f"::error::{message}")
               sys.exit(1)
 
-          shown = subprocess.run(
+          # Builds nothing. No -derivedDataPath: xcodebuild rejects it with
+          # -alltargets (usage error 64) unless a scheme is given.
+          result = subprocess.run(
               ["xcodebuild", "-showBuildSettings", "-json",
                "-project", os.environ["PROJECT"], "-alltargets",
-               "-configuration", "Release", "-sdk", "iphoneos",
-               "-derivedDataPath", os.path.join(temp, "DerivedData")],
-              check=True, capture_output=True, text=True).stdout
+               "-configuration", "Release", "-sdk", "iphoneos"],
+              capture_output=True, text=True)
+          if result.returncode != 0:
+              print(result.stderr, file=sys.stderr)
+              fail(f"xcodebuild -showBuildSettings failed with status {result.returncode}.")
+          shown = result.stdout
           settings_by_id = {}
           for target in json.loads(shown[shown.index("["):]):
               settings = target["buildSettings"]
