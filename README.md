@@ -336,7 +336,7 @@ jobs:
 
 - **Package manager**: pnpm everywhere
 - **Runner**: All workflows respect `vars.RUNS_ON`, defaulting to `ubuntu-latest`. It's set at the org level for private repos (`unstable-studios/echo-core`, decision 0007). `ci-apple.yml` needs a Mac and uses `vars.RUNS_ON_MACOS` the same way. `publish-testflight.yml` uses `vars.RUNS_ON_MACOS_PUBLISH`, a runner only publish jobs use, and takes a `runs-on` input to override it.
-- **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; the runner keeps the pnpm store on the host instead. Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
+- **Caching**: the pnpm store and Terraform plugin caches use GitHub's cache on GitHub-hosted runners only (`if: runner.environment == 'github-hosted'`). On self-hosted runners (echo-turbine) uploading to GitHub's cache took minutes per job; there, pnpm 11+ share a store on the host, and pnpm 10 keeps its store in the job's pod and downloads its packages every job (unstable-studios/echo-core#449). Follow the same rule for new `actions/cache` steps and `setup-*` `cache:` inputs.
 - **Concurrency**: CI cancels in-progress; deploys and releases do not.
 - **Release PRs**: Use `release-pr-check.yml` instead of full CI — the code has already passed CI on the constituent commits.
 - **Secrets**: Use `secrets: inherit` to pass all secrets from the caller. Doppler integration is opt-in via `doppler-project` input.
