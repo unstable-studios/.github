@@ -60,10 +60,11 @@ runs:
       shell: bash
       run: echo "path=$(pnpm store path --silent)" >> "$GITHUB_OUTPUT"
 
-    # GitHub-hosted runners only. Self-hosted runners (echo-turbine) keep the
-    # store on the host (npm_config_store_dir for pnpm 10, pnpm_config_store_dir
-    # for pnpm 11+), and uploading to GitHub's
-    # cache from there took minutes per job.
+    # GitHub-hosted runners only: uploading to GitHub's cache from the
+    # self-hosted runners (echo-turbine) took minutes per job. There, pnpm 11+
+    # share a store on the host (pnpm_config_store_dir), and pnpm 10 keeps its
+    # store in the job's pod, so it downloads its packages every job
+    # (unstable-studios/echo-core#449).
     - name: Cache pnpm store
       if: runner.environment == 'github-hosted'
       uses: actions/cache@v6
