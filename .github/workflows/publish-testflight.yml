@@ -54,7 +54,7 @@ name: Publish TestFlight
 # new in ~/Library/Keychains: the first xcodebuild call can make macOS
 # create the account's data protection keychain there (a folder named
 # with the Mac's hardware UUID), which the search list doesn't cover and
-# which may hold the Apple Development key. secd, the account's keychain
+# which may hold an Apple Development key. secd, the account's keychain
 # daemon, keeps that database open between jobs and can start again
 # between them, so the job stops it at the start, removes any data
 # protection keychain an earlier job left, and stops it again around the
@@ -608,7 +608,7 @@ jobs:
 
           # Whatever is new in ~/Library/Keychains, such as the data
           # protection keychain (<hardware UUID>/keychain-2.db), which can
-          # hold the Apple Development key signing made. secd, the
+          # hold an Apple Development key if signing made one. secd, the
           # account's keychain daemon, stays running between jobs with the
           # database open: removing the files alone would leave it serving
           # the old one to the next job, and unlinking an open SQLite
